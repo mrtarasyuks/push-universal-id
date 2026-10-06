@@ -1,0 +1,8 @@
+node_modules/
+.DS_Store
+*.log
+.vite/
+.env
+.env.*
+!.env.example
+_private/

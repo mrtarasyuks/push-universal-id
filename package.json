@@ -1,0 +1,22 @@
+{
+  "name": "push-universal-id",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Read-only explorer for Push Chain Universal Executor Accounts (UEA) on the Donut testnet.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@pushchain/core": "^6.0.26",
+    "bs58": "^6.0.0",
+    "viem": "^2.57.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^5.4.21"
+  }
+}
