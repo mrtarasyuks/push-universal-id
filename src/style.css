@@ -196,3 +196,48 @@ button[type="submit"]:hover { filter: brightness(1.08); }
   .tx { grid-template-columns: 42px 1fr 80px; }
   .tx-counter, .tx-time { display: none; }
 }
+
+/* ---- round 1 additions: universal actions, apps, reverse, load-more ---- */
+.count-badge {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 9px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.tx-dir { white-space: nowrap; }
+.tx .idx { color: var(--muted); font-size: 10px; margin-left: 6px; }
+.tx-counter { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.hint code { font-family: ui-monospace, monospace; color: var(--accent-2); background: var(--bg-2); padding: 0 4px; border-radius: 5px; }
+.hint-warn { color: var(--pending); }
+
+.map-muted { color: var(--muted) !important; }
+
+.example-reverse { border-color: var(--accent-2) !important; }
+.example-reverse .example-chain { color: var(--accent-2); }
+
+.loadmore { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.load-btn {
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 18px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.load-btn:hover:not(:disabled) { filter: brightness(1.08); }
+.load-btn:disabled { opacity: 0.6; cursor: default; }
+.load-btn.secondary {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--accent-2);
+  margin-left: 8px;
+}
+.loadmore > .load-btn + .load-btn { margin-top: -0px; }

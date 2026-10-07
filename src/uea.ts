@@ -4,9 +4,13 @@ import {
   getCreate2Address,
   getAddress,
   bytesToHex,
+  hexToBytes,
+  encodeFunctionData,
+  decodeFunctionResult,
   type Address,
 } from 'viem';
 import bs58 from 'bs58';
+import { ethCall } from './blockscout';
 // We lean on the SDK's own authoritative constants (namespaces, chain ids, the
 // UEA factory + proxy addresses) so this tool stays correct if Push updates
 // them — but we deliberately deep-import only the constant modules, not the
@@ -96,4 +100,73 @@ export function deriveUea(chain: CHAIN, address: string): string {
   const initCodeHash = keccak256(runtimeCode);
 
   return getCreate2Address({ from: FACTORY, salt, bytecodeHash: initCodeHash });
+}
+
+// ---- Reverse lookup: UEA on Push Chain → origin account ----
+
+const GET_ORIGIN_ABI = [
+  {
+    type: 'function',
+    name: 'getOriginForUEA',
+    stateMutability: 'view',
+    inputs: [{ name: 'addr', type: 'address' }],
+    outputs: [
+      {
+        name: 'account',
+        type: 'tuple',
+        components: [
+          { name: 'chainNamespace', type: 'string' },
+          { name: 'chainId', type: 'string' },
+          { name: 'owner', type: 'bytes' },
+        ],
+      },
+      { name: 'isUEA', type: 'bool' },
+    ],
+  },
+] as const;
+
+export interface OriginAccount {
+  isUEA: boolean;
+  namespace: string;
+  chainId: string;
+  /** Owner formatted for its namespace: EVM → checksummed 0x…, SVM → base58. */
+  owner: string;
+}
+
+/**
+ * Ask the Push UEA factory who owns a given UEA — the inverse of deriveUea.
+ * One read-only `getOriginForUEA` eth_call through Blockscout's RPC proxy; the
+ * factory itself stores the mapping (set when it emitted `UEADeployed`), so this
+ * is authoritative, not a guess. Returns `isUEA:false` for any address the
+ * factory never registered (a plain wallet, or a UEA not deployed yet).
+ */
+export async function resolveOrigin(uea: string): Promise<OriginAccount> {
+  const data = encodeFunctionData({
+    abi: GET_ORIGIN_ABI,
+    functionName: 'getOriginForUEA',
+    args: [getAddress(uea)],
+  });
+  const raw = await ethCall(FACTORY, data);
+  const [account, isUEA] = decodeFunctionResult({
+    abi: GET_ORIGIN_ABI,
+    functionName: 'getOriginForUEA',
+    data: raw as `0x${string}`,
+  }) as [{ chainNamespace: string; chainId: string; owner: `0x${string}` }, boolean];
+
+  const namespace = account.chainNamespace;
+  const ownerHex = account.owner;
+  let owner = ownerHex as string;
+  if (isUEA && ownerHex && ownerHex !== '0x') {
+    if (namespace === VM_NAMESPACE[VM.SVM]) {
+      owner = bs58.encode(hexToBytes(ownerHex));
+    } else {
+      // EVM origins store a 20-byte address.
+      try {
+        owner = getAddress(ownerHex as Address);
+      } catch {
+        owner = ownerHex;
+      }
+    }
+  }
+  return { isUEA, namespace, chainId: account.chainId, owner };
 }

@@ -3,12 +3,17 @@ import { DONUT } from './chains';
 // Thin typed wrapper over the public Blockscout REST API v2 running on
 // donut.push.network. No key, no backend — the browser calls it directly.
 
+export interface Implementation {
+  address: string;
+  name: string | null;
+}
+
 export interface AddressInfo {
   hash: string;
   coin_balance: string | null; // wei string
   is_contract: boolean;
   creation_tx_hash?: string | null;
-  implementations?: unknown[];
+  implementations?: Implementation[];
   name?: string | null;
 }
 
@@ -38,6 +43,18 @@ export interface Tx {
   result?: string | null;
   status?: string | null;
   block_number?: number | null;
+  // Full calldata — we decode executeUniversalTx from this with viem to find the
+  // real target app of each universal action (Blockscout's decoded_input is only
+  // present for verified contracts, raw_input is always there).
+  raw_input?: string | null;
+}
+
+/** Blockscout opaque cursor for the next page of a paginated list. */
+export type PageParams = Record<string, unknown> | null;
+
+export interface Page<T> {
+  items: T[];
+  next_page_params: PageParams;
 }
 
 export interface TokenInfo {
@@ -95,12 +112,52 @@ export async function getCounters(address: string): Promise<Counters> {
   return get<Counters>(`/addresses/${address}/counters`);
 }
 
-export async function getTransactions(address: string): Promise<Tx[]> {
-  const data = await get<{ items: Tx[] }>(`/addresses/${address}/transactions`);
-  return data.items ?? [];
+function pageQuery(params: PageParams): string {
+  if (!params) return '';
+  const u = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v != null) u.set(k, String(v));
+  }
+  const s = u.toString();
+  return s ? `?${s}` : '';
 }
 
-export async function getTokenTransfers(address: string): Promise<TokenTransfer[]> {
-  const data = await get<{ items: TokenTransfer[] }>(`/addresses/${address}/token-transfers`);
-  return data.items ?? [];
+export async function getTransactions(address: string, params: PageParams = null): Promise<Page<Tx>> {
+  const data = await get<Page<Tx>>(`/addresses/${address}/transactions${pageQuery(params)}`);
+  return { items: data.items ?? [], next_page_params: data.next_page_params ?? null };
+}
+
+export async function getTokenTransfers(
+  address: string,
+  params: PageParams = null
+): Promise<Page<TokenTransfer>> {
+  const data = await get<Page<TokenTransfer>>(
+    `/addresses/${address}/token-transfers${pageQuery(params)}`
+  );
+  return { items: data.items ?? [], next_page_params: data.next_page_params ?? null };
+}
+
+/**
+ * Read-only eth_call through Blockscout's JSON-RPC proxy (CORS-enabled). Used
+ * for the reverse lookup (factory.getOriginForUEA). Returns the raw hex result;
+ * never signs or sends anything.
+ */
+export async function ethCall(to: string, data: string): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetch(DONUT.ethRpc, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to, data }, 'latest'] }),
+    });
+  } catch (e) {
+    throw new ApiError(
+      `Не вдалося звернутись до RPC Push Chain (${(e as Error).message}).`
+    );
+  }
+  if (!res.ok) throw new ApiError(`RPC відповів ${res.status}`);
+  const json = (await res.json()) as { result?: string; error?: { message?: string } };
+  if (json.error) throw new ApiError(json.error.message || 'Помилка eth_call');
+  if (typeof json.result !== 'string') throw new ApiError('Порожня відповідь eth_call');
+  return json.result;
 }

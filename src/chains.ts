@@ -1,6 +1,10 @@
-import { CHAIN } from './uea';
+import { CHAIN, chainMeta } from './uea';
 
 export type VmKind = 'evm' | 'svm';
+
+/** Special <select> value: the input is already a UEA on Push Chain and we
+ * resolve its origin wallet/chain (reverse lookup). */
+export const REVERSE_ID = 'reverse';
 
 export interface OriginChain {
   /** Stable id used in the ?chain= URL param and the <select>. */
@@ -77,10 +81,23 @@ export function findChain(id: string | null): OriginChain | undefined {
   return ORIGIN_CHAINS.find((c) => c.id === id);
 }
 
+/** Map a CAIP namespace + chain id (as returned by the factory's
+ * getOriginForUEA) back to a known origin chain, for labelling a reverse
+ * lookup. Returns undefined when the origin chain is not one we list. */
+export function findChainByCaip(namespace: string, chainId: string): OriginChain | undefined {
+  return ORIGIN_CHAINS.find((c) => {
+    const m = chainMeta(c.chain);
+    return m.namespace === namespace && m.chainId === chainId;
+  });
+}
+
 // ---- Donut testnet facts (from the SDK's own constants) ----
 export const DONUT = {
   chainId: 42101,
   rpc: 'https://evm.donut.rpc.push.org/',
+  // Blockscout's JSON-RPC proxy — unlike the raw EVM RPC it sends CORS headers,
+  // so the browser can make read-only eth_call / eth_getLogs here with no key.
+  ethRpc: 'https://donut.push.network/api/eth-rpc',
   explorer: 'https://donut.push.network',
   blockscoutApi: 'https://donut.push.network/api/v2',
   nativeSymbol: 'PC',
