@@ -76,6 +76,12 @@ export interface TokenTransfer {
   total?: { value: string | null; decimals: string | null } | null;
 }
 
+export interface TokenBalance {
+  token: TokenInfo | null;
+  value: string | null; // raw units
+  token_id?: string | null;
+}
+
 class ApiError extends Error {}
 
 async function get<T>(path: string): Promise<T> {
@@ -135,6 +141,13 @@ export async function getTokenTransfers(
     `/addresses/${address}/token-transfers${pageQuery(params)}`
   );
   return { items: data.items ?? [], next_page_params: data.next_page_params ?? null };
+}
+
+/** Current token holdings of an address (not paginated — Blockscout returns the
+ * whole list). Empty array when the address holds nothing / is unknown. */
+export async function getTokenBalances(address: string): Promise<TokenBalance[]> {
+  const data = await get<TokenBalance[]>(`/addresses/${address}/token-balances`);
+  return Array.isArray(data) ? data : [];
 }
 
 /**

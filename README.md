@@ -7,6 +7,13 @@ Push Chain **Donut testnet**: whether it is deployed, its balance, transaction c
 token transfers, the real apps it interacted with, and recent activity — with a
 link to the Donut explorer for every on-chain item.
 
+The derived UEA is also **verified on-chain**: besides computing it offchain (`CREATE2`), the
+tool asks the Push factory's own `computeUEA` view to confirm the address — so you see the chain
+itself validating the result, even when the account is not deployed yet. It shows the UEA's
+**current token holdings** (what it holds on Push Chain right now, with the external chain each
+bridged asset represents), and every address has a one-click **copy** button plus a **copy-link**
+button to share the exact result.
+
 It also works **in reverse**: paste a UEA address that is already on Push Chain and it tells
 you which origin wallet and chain it belongs to (asked straight from the Push factory), and it
 **decodes each `executeUniversalTx`** to show the real target application of every universal
@@ -69,9 +76,15 @@ tool shows.
 
 - **UEA address** — computed in-browser with `CREATE2`, mirroring
   `computeUEAOffchain` in `@pushchain/core` v6 (namespaces, chain ids, the UEA factory and
-  the EIP-1167 proxy come from the SDK's own constants). No RPC call is needed, which keeps
-  the site a pure static page — the Donut EVM RPC does not send CORS headers, so the browser
-  cannot call it directly anyway.
+  the EIP-1167 proxy come from the SDK's own constants). No RPC call is needed to show it, which
+  keeps the site a pure static page.
+- **On-chain verification** — the derived address is cross-checked against the factory's own
+  `computeUEA` view via one read-only `eth_call` through Blockscout's RPC proxy. When it matches,
+  the UI shows "✓ confirmed by the Push factory"; when the factory is unreachable it degrades to
+  "computed offchain" rather than claiming a confirmation it does not have. Read-only; nothing is
+  signed.
+- **Current token holdings** — `GET /addresses/{uea}/token-balances`, labelled with the external
+  chain each bridged synthetic PRC-20 represents (from the SDK's token map).
 - **Activity** — the public Blockscout REST API v2 at `https://donut.push.network/api/v2`
   (`/addresses/{uea}`, `/counters`, `/transactions`, `/token-transfers`), paginated with the
   API's own `next_page_params`. No key.

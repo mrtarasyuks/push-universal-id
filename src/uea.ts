@@ -56,6 +56,27 @@ export function toCaip(chain: CHAIN, address: string): string {
   return `${namespace}:${chainId}:${address}`;
 }
 
+/** The `UniversalAccountId` tuple the factory keys a UEA by: namespace, chain id,
+ * and the owner as raw bytes (EVM → 20-byte address, SVM → the 32-byte pubkey). */
+interface AccountId {
+  chainNamespace: string;
+  chainId: string;
+  owner: `0x${string}`;
+}
+
+function buildAccountId(chain: CHAIN, address: string): AccountId {
+  const { namespace, chainId, vm } = chainMeta(chain);
+  let owner: `0x${string}`;
+  if (vm === VM.EVM) {
+    owner = getAddress(address); // validates + checksums; throws if malformed
+  } else {
+    const bytes = Uint8Array.from(bs58.decode(address));
+    if (bytes.length !== 32) throw new Error('Невалідна Solana-адреса (очікується 32 байти).');
+    owner = bytesToHex(bytes);
+  }
+  return { chainNamespace: namespace, chainId, owner };
+}
+
 /**
  * Deterministically derive the Universal Executor Account (UEA) on Push Chain
  * for an origin account — fully offchain (CREATE2), no RPC, no key.
@@ -67,16 +88,7 @@ export function toCaip(chain: CHAIN, address: string): string {
 export function deriveUea(chain: CHAIN, address: string): string {
   if (isPushChain(chain)) return getAddress(address);
 
-  const { namespace, chainId, vm } = chainMeta(chain);
-
-  let ownerHex: `0x${string}`;
-  if (vm === VM.EVM) {
-    ownerHex = getAddress(address); // validates + checksums; throws if malformed
-  } else {
-    const bytes = Uint8Array.from(bs58.decode(address));
-    if (bytes.length !== 32) throw new Error('Невалідна Solana-адреса (очікується 32 байти).');
-    ownerHex = bytesToHex(bytes);
-  }
+  const account = buildAccountId(chain, address);
 
   const encodedAccountId = encodeAbiParameters(
     [
@@ -89,7 +101,7 @@ export function deriveUea(chain: CHAIN, address: string): string {
         ],
       },
     ],
-    [{ chainNamespace: namespace, chainId, owner: ownerHex }]
+    [account]
   );
   const salt = keccak256(encodedAccountId);
 
@@ -100,6 +112,61 @@ export function deriveUea(chain: CHAIN, address: string): string {
   const initCodeHash = keccak256(runtimeCode);
 
   return getCreate2Address({ from: FACTORY, salt, bytecodeHash: initCodeHash });
+}
+
+// ---- Forward verification: ask the factory to compute the UEA itself ----
+
+const COMPUTE_UEA_ABI = [
+  {
+    type: 'function',
+    name: 'computeUEA',
+    stateMutability: 'view',
+    inputs: [
+      {
+        name: '_id',
+        type: 'tuple',
+        components: [
+          { name: 'chainNamespace', type: 'string' },
+          { name: 'chainId', type: 'string' },
+          { name: 'owner', type: 'bytes' },
+        ],
+      },
+    ],
+    outputs: [{ name: '', type: 'address' }],
+  },
+] as const;
+
+/**
+ * Cross-check the offchain-derived UEA against the factory's own `computeUEA`
+ * view on Donut — one read-only eth_call through the Blockscout RPC proxy. This
+ * is the chain confirming our CREATE2 math, and it works even when the UEA is
+ * not deployed yet. Returns the factory's address, or null when the call cannot
+ * be made (so the UI degrades to "unverified" rather than claiming a false
+ * confirmation). Never signs or sends anything.
+ */
+export async function verifyUeaOnchain(chain: CHAIN, address: string): Promise<string | null> {
+  if (isPushChain(chain)) return null; // a native address is its own UEA, nothing to verify
+  let data: `0x${string}`;
+  try {
+    data = encodeFunctionData({
+      abi: COMPUTE_UEA_ABI,
+      functionName: 'computeUEA',
+      args: [buildAccountId(chain, address)],
+    });
+  } catch {
+    return null;
+  }
+  try {
+    const raw = await ethCall(FACTORY, data);
+    const addr = decodeFunctionResult({
+      abi: COMPUTE_UEA_ABI,
+      functionName: 'computeUEA',
+      data: raw as `0x${string}`,
+    }) as Address;
+    return getAddress(addr);
+  } catch {
+    return null;
+  }
 }
 
 // ---- Reverse lookup: UEA on Push Chain → origin account ----

@@ -284,3 +284,30 @@ button[type="submit"]:hover { filter: brightness(1.08); }
 @media (max-width: 560px) {
   .app-name a { max-width: 140px; }
 }
+
+/* ---- round 3 additions: on-chain verify, holdings, copy buttons ---- */
+
+.card-head-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+
+/* copy buttons (addresses + shareable link) */
+.copy-btn {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 7px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.copy-btn:hover { border-color: var(--accent-2); color: var(--text); }
+.copy-btn.copied { color: var(--ok); border-color: var(--ok); }
+.copy-link { font-weight: 600; }
+
+.map-addr-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.map-addr-row .map-addr { margin: 0; }
+
+/* on-chain verification note */
+.verify-ok { color: var(--ok); }
+.verify-ok strong { color: var(--ok); }

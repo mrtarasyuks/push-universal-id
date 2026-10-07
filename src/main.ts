@@ -7,19 +7,21 @@ import {
   donutAddressUrl,
   donutTxUrl,
 } from './chains';
-import { deriveUea, toCaip, isPushChain, resolveOrigin } from './uea';
+import { deriveUea, toCaip, isPushChain, resolveOrigin, verifyUeaOnchain, CHAIN } from './uea';
 import {
   getAddressInfo,
   getCounters,
   getTransactions,
   getTokenTransfers,
+  getTokenBalances,
   isNotFound,
   type Tx,
   type TokenTransfer,
+  type TokenBalance,
   type PageParams,
 } from './blockscout';
 import { decodeUniversalAction, selectorLabel, type UniversalAction, type InnerCall } from './actions';
-import { knownAddr, isInfra } from './known';
+import { knownAddr, isInfra, tokenMeta } from './known';
 import { shortAddr, formatUnits, formatInt, sumGasWei, timeAgo, nowUtc } from './format';
 import { getAddress } from 'viem';
 import './style.css';
@@ -108,6 +110,18 @@ function escapeHtml(s: string): string {
   );
 }
 
+/** A small "copy to clipboard" button carrying its payload in a data attribute;
+ * a single delegated handler (wired after render) does the actual copy. */
+function copyBtn(text: string, title = 'Скопіювати'): string {
+  return `<button type="button" class="copy-btn" data-copy="${escapeHtml(text)}" title="${escapeHtml(
+    title
+  )}" aria-label="${escapeHtml(title)}">⧉</button>`;
+}
+
+function donutTokenUrl(address: string): string {
+  return `${DONUT.explorer}/token/${address}`;
+}
+
 // Ukrainian plural: 1 → one, 2–4 → few, else many (ignoring the teens).
 function plural(n: number, one: string, few: string, many: string): string {
   const mod10 = n % 10;
@@ -145,6 +159,8 @@ interface LookupState {
   native: boolean; // origin already on Push Chain
   reverse: boolean;
   reverseNote: string | null; // message when a reverse lookup found no UEA
+  // On-chain verification of the derived UEA against the factory's computeUEA.
+  verify: 'off' | 'pending' | 'ok' | 'mismatch' | 'unavailable';
   // Activity.
   deployed: boolean;
   balanceWei: string | null;
@@ -152,6 +168,7 @@ interface LookupState {
   tokenXferCount: string;
   txs: Tx[];
   tokenTransfers: TokenTransfer[];
+  holdings: TokenBalance[];
   txNext: PageParams;
   tokNext: PageParams;
   names: Map<string, NameInfo>;
@@ -194,6 +211,7 @@ async function run() {
   let caip = '';
   let native = false;
   let reverseNote: string | null = null;
+  let verifyChain: CHAIN | null = null;
 
   if (reverse) {
     // Reverse: the input IS a UEA on Push Chain; ask the factory for its origin.
@@ -241,6 +259,7 @@ async function run() {
     native = isPushChain(chainDef.chain);
     originLabel = native ? 'Push Chain (вже тут)' : chainDef.label;
     originAddress = rawInput;
+    if (!native) verifyChain = chainDef.chain;
   }
 
   setStatus('Читаю активність UEA з Push Chain (Donut)…', 'info');
@@ -252,14 +271,16 @@ async function run() {
   let tokenXferCount = '0';
   let txs: Tx[] = [];
   let tokenTransfers: TokenTransfer[] = [];
+  let holdings: TokenBalance[] = [];
   let txNext: PageParams = null;
   let tokNext: PageParams = null;
 
-  const [infoRes, countersRes, txRes, tokenRes] = await Promise.allSettled([
+  const [infoRes, countersRes, txRes, tokenRes, balRes] = await Promise.allSettled([
     getAddressInfo(uea),
     getCounters(uea),
     getTransactions(uea),
     getTokenTransfers(uea),
+    getTokenBalances(uea),
   ]);
 
   if (infoRes.status === 'fulfilled') {
@@ -286,6 +307,11 @@ async function run() {
   } else if (!isNotFound(tokenRes.reason)) {
     warnings.push(`Токен-трансфери: ${(tokenRes.reason as Error).message}`);
   }
+  if (balRes.status === 'fulfilled') {
+    holdings = balRes.value;
+  } else if (!isNotFound(balRes.reason)) {
+    warnings.push(`Баланси токенів: ${(balRes.reason as Error).message}`);
+  }
 
   state = {
     uea,
@@ -295,12 +321,14 @@ async function run() {
     native,
     reverse,
     reverseNote,
+    verify: verifyChain ? 'pending' : 'off',
     deployed,
     balanceWei,
     txCount,
     tokenXferCount,
     txs,
     tokenTransfers,
+    holdings,
     txNext,
     tokNext,
     names: new Map(),
@@ -316,9 +344,25 @@ async function run() {
   await resolveNames();
   render();
 
+  // Confirm the offchain-derived UEA against the factory's own computeUEA, in
+  // the background — the chain validating our CREATE2 math for the reviewer.
+  if (verifyChain) void verifyUea(verifyChain, originAddress, uea);
+
   // Fetch the rest of the history in the background so gas and the top-apps
   // summary reflect the whole account, not just the first ~50 items.
   if (state.txNext || state.tokNext) void autoLoad();
+}
+
+/** Background on-chain verification of the derived UEA. */
+async function verifyUea(chain: CHAIN, address: string, derived: string) {
+  const target = state;
+  if (!target) return;
+  const factoryUea = await verifyUeaOnchain(chain, address);
+  // A later lookup may have replaced state while we waited — ignore if so.
+  if (state !== target) return;
+  if (!factoryUea) target.verify = 'unavailable';
+  else target.verify = factoryUea.toLowerCase() === derived.toLowerCase() ? 'ok' : 'mismatch';
+  render();
 }
 
 // Collect the real targets (universal-action targets + token counterparties) and
@@ -559,9 +603,12 @@ function render() {
   const originNodeInner = m.reverse && m.reverseNote
     ? `<div class="map-addr map-muted">невідомо</div>
        <div class="map-caip">фабрика не має origin для цього UEA</div>`
-    : `<div class="map-addr" title="${escapeHtml(m.originAddress)}">${escapeHtml(
+    : `<div class="map-addr-row">
+         <div class="map-addr" title="${escapeHtml(m.originAddress)}">${escapeHtml(
         shortAddr(m.originAddress, 10, 8)
       )}</div>
+         ${copyBtn(m.originAddress, 'Скопіювати origin-адресу')}
+       </div>
        <div class="map-caip">${escapeHtml(m.caip)}</div>`;
 
   const mapping = `
@@ -573,11 +620,26 @@ function render() {
       <div class="map-arrow">${m.reverse ? '← UEA ←' : '→ UEA →'}</div>
       <div class="map-node map-node-uea">
         <div class="map-label">Universal Executor Account · Push Chain Donut</div>
-        <a class="map-addr" href="${donutAddressUrl(m.uea)}" target="_blank" rel="noopener" title="${escapeHtml(
+        <div class="map-addr-row">
+          <a class="map-addr" href="${donutAddressUrl(m.uea)}" target="_blank" rel="noopener" title="${escapeHtml(
     m.uea
   )}">${escapeHtml(shortAddr(m.uea, 12, 10))} ↗</a>
+          ${copyBtn(m.uea, 'Скопіювати адресу UEA')}
+        </div>
       </div>
     </div>`;
+
+  // On-chain verification of the derived UEA (forward lookups only).
+  const verifyHtml =
+    m.verify === 'ok'
+      ? `<p class="hint verify-ok">✓ Адресу UEA підтверджено <strong>на самій фабриці Push</strong> (<code>computeUEA</code>, read-only) — не лише обчислено офчейн.</p>`
+      : m.verify === 'pending'
+      ? `<p class="hint">Перевіряю адресу на фабриці Push on-chain…</p>`
+      : m.verify === 'mismatch'
+      ? `<p class="hint hint-warn">⚠ Офчейн-обчислення (CREATE2) не збіглося з <code>computeUEA</code> фабрики. Показую офчейн-результат — звірте вручну в експлорері.</p>`
+      : m.verify === 'unavailable'
+      ? `<p class="hint">Фабрика зараз недоступна для on-chain перевірки — адресу обчислено офчейн (CREATE2, ідентично SDK).</p>`
+      : '';
 
   const reverseNoteHtml = m.reverseNote
     ? `<p class="hint hint-warn">${escapeHtml(m.reverseNote)}</p>`
@@ -720,6 +782,59 @@ function render() {
         )} PC (за ${outgoing.length} вихідних tx).</p>`
       : '';
 
+  // ---- current token holdings (portfolio the UEA holds right now) ----
+  // Learn decimals from here too, so amounts elsewhere format correctly.
+  for (const h of m.holdings) {
+    const addr = h.token?.address?.toLowerCase();
+    const dec = h.token?.decimals;
+    if (addr && dec != null && /^\d+$/.test(String(dec))) tokenDecimals.set(addr, Number(dec));
+  }
+  const heldTokens = m.holdings
+    .filter((h) => h.value && /^\d+$/.test(h.value) && h.value !== '0' && h.token?.address)
+    .map((h) => {
+      const addr = h.token!.address;
+      const meta = tokenMeta(addr) ?? (knownAddr(addr)?.chain ? { symbol: '', chain: knownAddr(addr)!.chain! } : null);
+      const isNft = h.token?.type === 'ERC-721' || h.token?.type === 'ERC-1155';
+      const dec = isNft ? 0 : h.token?.decimals && /^\d+$/.test(h.token.decimals) ? Number(h.token.decimals) : 18;
+      return {
+        addr,
+        symbol: h.token?.symbol || h.token?.name || (isNft ? 'NFT' : 'токен'),
+        chain: meta?.chain ?? null,
+        value: BigInt(h.value!),
+        amount: formatUnits(h.value!, dec, 4),
+        isNft,
+      };
+    })
+    .sort((a, b) => {
+      // Synthetic / known-chain tokens first; then by raw value descending.
+      if (!!a.chain !== !!b.chain) return a.chain ? -1 : 1;
+      return a.value > b.value ? -1 : a.value < b.value ? 1 : 0;
+    });
+
+  const holdingsHtml = heldTokens.length
+    ? `<section class="block">
+        <h3>Токени на балансі UEA <span class="count-badge">${heldTokens.length}</span></h3>
+        <p class="hint">Що UEA тримає на Push Chain зараз (поточні баланси з Blockscout). Для бриджених активів показано, який зовнішній чейн вони представляють.</p>
+        <ul class="apps">
+          ${heldTokens
+            .slice(0, 30)
+            .map(
+              (t) => `<li class="app">
+                <span class="app-name">
+                  <a href="${donutTokenUrl(t.addr)}" target="_blank" rel="noopener">${escapeHtml(
+                t.symbol
+              )} ↗</a>
+                  ${t.chain ? `<span class="tag">${escapeHtml(t.chain)}</span>` : ''}
+                  ${t.isNft ? '<span class="tag">NFT</span>' : ''}
+                </span>
+                <span class="app-nums">${escapeHtml(t.amount)}${t.isNft ? ' шт' : ` ${escapeHtml(t.symbol)}`}</span>
+              </li>`
+            )
+            .join('')}
+        </ul>
+      </section>`
+    : '';
+
   // ---- raw tx list ----
   const hasActivity =
     m.txs.length > 0 ||
@@ -795,14 +910,21 @@ function render() {
     <div class="card">
       <div class="card-head">
         <h2>Push Universal ID</h2>
-        ${statusBadge}
+        <div class="card-head-right">
+          <button type="button" class="copy-btn copy-link" data-copy="${escapeHtml(
+            window.location.href
+          )}" title="Скопіювати посилання на цей результат">🔗 Посилання</button>
+          ${statusBadge}
+        </div>
       </div>
       ${mapping}
+      ${verifyHtml}
       ${reverseNoteHtml}
       ${sdkNote}
       ${metrics}
       ${relayerHtml}
       ${gasHtml}
+      ${holdingsHtml}
       ${actionsHtml}
       ${appsHtml}
       ${tokenHtml}
@@ -908,10 +1030,34 @@ function wireRepoLink() {
 }
 
 // ---- boot ----
+// One delegated handler for every copy button in the result card.
+function wireCopy() {
+  el.result.addEventListener('click', async (e) => {
+    const btn = (e.target as HTMLElement).closest('.copy-btn') as HTMLButtonElement | null;
+    if (!btn) return;
+    e.preventDefault();
+    const text = btn.getAttribute('data-copy');
+    if (!text) return;
+    const original = btn.innerHTML;
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.classList.add('copied');
+      btn.innerHTML = btn.classList.contains('copy-link') ? '✓ Скопійовано' : '✓';
+    } catch {
+      btn.innerHTML = '✗';
+    }
+    setTimeout(() => {
+      btn.classList.remove('copied');
+      btn.innerHTML = original;
+    }, 1400);
+  });
+}
+
 function boot() {
   buildChainOptions();
   buildExamples();
   wireRepoLink();
+  wireCopy();
   el.chain.addEventListener('change', onChainChange);
   el.form.addEventListener('submit', (e) => {
     e.preventDefault();
