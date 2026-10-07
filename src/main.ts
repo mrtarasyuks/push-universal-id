@@ -70,26 +70,28 @@ function buildChainOptions() {
   el.chain.appendChild(rev);
 }
 
+// Keep this to just the two most useful one-click examples (a forward lookup
+// and a reverse lookup) — a long row of buttons is clutter, not a shortcut.
 function buildExamples() {
   el.examples.innerHTML = '';
-  for (const c of ORIGIN_CHAINS) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'example';
-    b.innerHTML = `<span class="example-chain">${c.label}</span><span class="example-addr">${shortAddr(
-      c.example,
-      8,
-      6
-    )}</span>`;
-    b.title = c.exampleNote;
-    b.addEventListener('click', () => {
-      el.address.value = c.example;
-      el.chain.value = c.id;
-      onChainChange();
-      run();
-    });
-    el.examples.appendChild(b);
-  }
+  const forward = ORIGIN_CHAINS[0]; // Ethereum Sepolia — a real owner with an active UEA
+  const fb = document.createElement('button');
+  fb.type = 'button';
+  fb.className = 'example';
+  fb.innerHTML = `<span class="example-chain">${forward.label}</span><span class="example-addr">${shortAddr(
+    forward.example,
+    8,
+    6
+  )}</span>`;
+  fb.title = forward.exampleNote;
+  fb.addEventListener('click', () => {
+    el.address.value = forward.example;
+    el.chain.value = forward.id;
+    onChainChange();
+    run();
+  });
+  el.examples.appendChild(fb);
+
   // A reverse-lookup example: the UEA we know maps back to the ETH Sepolia owner.
   const rb = document.createElement('button');
   rb.type = 'button';
@@ -140,6 +142,52 @@ function donutTokenUrl(address: string): string {
   return `${DONUT.explorer}/token/${address}`;
 }
 
+/** A metric number that counts up from 0 on render instead of just appearing —
+ * `finalText` is the exact already-formatted string (with grouping/decimals),
+ * shown immediately as a safe fallback and restored exactly once the count
+ * finishes, so the animation can never leave a rounding artefact behind. */
+function countSpan(target: number, finalText: string, decimals = 0): string {
+  return `<span class="countup" data-target="${target}" data-decimals="${decimals}" data-final="${escapeHtml(
+    finalText
+  )}">${escapeHtml(finalText)}</span>`;
+}
+
+/** Animate every `.countup` span inside `root` from 0 to its target. A no-op
+ * under prefers-reduced-motion — the span's initial text is already the exact
+ * final value, so skipping the animation loses nothing. */
+function animateCountUps(root: ParentNode) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const spans = root.querySelectorAll<HTMLElement>('.countup');
+  spans.forEach((span) => {
+    const target = Number(span.dataset.target);
+    const decimals = Number(span.dataset.decimals || '0');
+    const final = span.dataset.final ?? '';
+    if (!Number.isFinite(target)) return;
+    const duration = 650;
+    const start = performance.now();
+    const step = (now: number) => {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);
+      if (t >= 1) {
+        span.textContent = final;
+        return;
+      }
+      const val = target * eased;
+      span.textContent = decimals ? val.toFixed(decimals) : String(Math.round(val));
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+/** How many digits sit after the decimal point in an already-formatted amount
+ * (e.g. "12.3456" → 4, "0" → 0) — so a count-up animation knows how many
+ * decimals to show while it runs. */
+function decimalsOfText(s: string): number {
+  const i = s.indexOf('.');
+  return i < 0 ? 0 : s.length - i - 1;
+}
+
 // Ukrainian plural: 1 → one, 2–4 → few, else many (ignoring the teens).
 function plural(n: number, one: string, few: string, many: string): string {
   const mod10 = n % 10;
@@ -147,6 +195,71 @@ function plural(n: number, one: string, few: string, many: string): string {
   if (mod10 === 1 && mod100 !== 11) return one;
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
   return many;
+}
+
+// ---- Rank: a simple, honest verdict computed only from the metrics shown
+// above (never anything not already on the page) ----
+interface Rank {
+  key: string;
+  label: string;
+  emoji: string;
+  reason: string;
+  next: string | null;
+}
+
+/** Four tiers, each a strictly higher bar than the last. The exact thresholds
+ * are also spelled out in the UI's "як рахується" fold, so nothing here is
+ * hidden from the person reading their own result. */
+function computeRank(deployed: boolean, txCountNum: number, realAppsCount: number, xcActionsCount: number): Rank {
+  if (!deployed && txCountNum === 0) {
+    return {
+      key: 'none',
+      label: 'Ще не на радарі',
+      emoji: '🔘',
+      reason: 'UEA ще не задеплоєний і не має жодної активності на Push Chain.',
+      next: 'Зроби першу Universal-транзакцію з origin-гаманця — UEA розгорнеться автоматично.',
+    };
+  }
+  if (xcActionsCount > 0) {
+    return {
+      key: 'native',
+      label: 'Universal Native',
+      emoji: '🟣',
+      reason: `Зробив ${xcActionsCount} ${plural(
+        xcActionsCount,
+        'крос-чейн дію',
+        'крос-чейн дії',
+        'крос-чейн дій'
+      )} через шлюз Push — це й є суть «Universal» на цьому чейні.`,
+      next: null,
+    };
+  }
+  if (txCountNum >= 5 && realAppsCount >= 2) {
+    return {
+      key: 'builder',
+      label: 'Builder',
+      emoji: '🔵',
+      reason: `${formatInt(txCountNum)} ${plural(
+        txCountNum,
+        'транзакція',
+        'транзакції',
+        'транзакцій'
+      )} і ${realAppsCount} ${plural(realAppsCount, 'застосунок', 'застосунки', 'застосунків')} на Push Chain, але ще без крос-чейн дій.`,
+      next: 'Зроби крос-чейн переказ або виклик через шлюз Push, щоб стати Universal Native.',
+    };
+  }
+  return {
+    key: 'explorer',
+    label: 'Explorer',
+    emoji: '🟢',
+    reason: `UEA задеплоєний і має ${formatInt(txCountNum)} ${plural(
+      txCountNum,
+      'транзакцію',
+      'транзакції',
+      'транзакцій'
+    )}, але поки мало застосунків.`,
+    next: 'Спробуй ще кілька застосунків на Push Chain, щоб стати Builder.',
+  };
 }
 
 // ---- URL state ----
@@ -248,6 +361,41 @@ function isUnlimited(n: bigint): boolean {
 
 const PAGE_CAP = 12; // safety cap for auto / "load all", ~600 items
 
+// A short, concrete loading sequence shown while we resolve the account and
+// pull its activity — plain skeleton cards instead of a blank page or a bare
+// spinner, so the wait reads as progress, not a stall.
+const LOADING_STEPS = ['Шукаю акаунт', 'Рахую активність', 'Готую результат'];
+
+function renderLoading(step: number) {
+  el.result.innerHTML = `
+    <div class="card loading-card">
+      <ol class="loading-steps">
+        ${LOADING_STEPS.map((s, i) => {
+          const cls = i < step ? 'done' : i === step ? 'active' : '';
+          const icon =
+            i < step
+              ? '✓'
+              : i === step
+              ? '<span class="loading-spin" aria-hidden="true"></span>'
+              : '';
+          return `<li class="loading-step ${cls}"><span class="loading-icon" aria-hidden="true">${icon}</span><span>${escapeHtml(
+            s
+          )}…</span></li>`;
+        }).join('')}
+      </ol>
+      <div class="skeleton-metrics">
+        ${Array.from({ length: 4 })
+          .map(() => '<div class="skeleton-box"></div>')
+          .join('')}
+      </div>
+      <div class="skeleton-rows">
+        ${Array.from({ length: 4 })
+          .map(() => '<div class="skeleton-row"></div>')
+          .join('')}
+      </div>
+    </div>`;
+}
+
 // ---- Core lookup ----
 async function run() {
   const rawInput = el.address.value.trim();
@@ -257,7 +405,8 @@ async function run() {
     return;
   }
   syncUrl(rawInput, el.chain.value);
-  el.result.innerHTML = '';
+  setStatus('', 'muted');
+  renderLoading(0);
 
   let uea: string;
   let originLabel: string;
@@ -269,10 +418,10 @@ async function run() {
 
   if (reverse) {
     // Reverse: the input IS a UEA on Push Chain; ask the factory for its origin.
-    setStatus('Шукаю origin-гаманець цього UEA через фабрику Push…', 'info');
     try {
       uea = getAddress(rawInput as `0x${string}`);
     } catch {
+      el.result.innerHTML = '';
       setStatus('Для зворотного пошуку введіть валідну EVM-адресу UEA на Push Chain (0x…).', 'error');
       return;
     }
@@ -290,20 +439,22 @@ async function run() {
           'Фабрика Push не знає цієї адреси як UEA. Це або звичайний гаманець на Push Chain, або UEA, який ще не задеплоєний. Активність нижче — для самої введеної адреси.';
       }
     } catch (e) {
+      el.result.innerHTML = '';
       setStatus(`Не вдалося зробити зворотний пошук: ${(e as Error).message}`, 'error');
       return;
     }
   } else {
     const chainDef = findChain(el.chain.value);
     if (!chainDef) {
+      el.result.innerHTML = '';
       setStatus('Оберіть origin-чейн.', 'error');
       return;
     }
-    setStatus('Обчислюю Universal Executor Account…', 'info');
     try {
       uea = deriveUea(chainDef.chain, rawInput);
       caip = toCaip(chainDef.chain, rawInput);
     } catch (e) {
+      el.result.innerHTML = '';
       setStatus(
         `Не вдалося обчислити UEA: ${(e as Error).message} Перевірте, що адреса валідна для обраного чейна.`,
         'error'
@@ -316,7 +467,7 @@ async function run() {
     if (!native) verifyChain = chainDef.chain;
   }
 
-  setStatus('Читаю активність UEA з Push Chain (Donut)…', 'info');
+  renderLoading(1);
 
   const warnings: string[] = [];
   let balanceWei: string | null = null;
@@ -401,7 +552,7 @@ async function run() {
     autoStopped: false,
   };
 
-  setStatus('', 'muted');
+  renderLoading(2);
   await resolveNames();
   render();
 
@@ -992,24 +1143,59 @@ function render() {
       ? ''
       : `<p class="hint">Акаунт розгортається «ліниво» — при першій Universal-транзакції з гаманця-власника. Адреса вже зарезервована детерміновано (CREATE2), тож вона не зміниться.</p>`;
 
+  const txCountNum = Number(m.txCount) || 0;
+  const tokenXferNum = Number(m.tokenXferCount) || 0;
+  const balanceNum = Number(balance.replace(/\s/g, '')) || 0;
+
   const metrics = `
     <div class="metrics">
       <div class="metric">
-        <div class="metric-value">${escapeHtml(balance)} <span class="unit">PC</span></div>
+        <div class="metric-value">${countSpan(balanceNum, balance, decimalsOfText(balance))} <span class="unit">PC</span></div>
         <div class="metric-label">Баланс UEA</div>
       </div>
       <div class="metric">
-        <div class="metric-value">${formatInt(m.txCount)}</div>
+        <div class="metric-value">${countSpan(txCountNum, formatInt(m.txCount))}</div>
         <div class="metric-label">Транзакцій усього</div>
       </div>
       <div class="metric">
-        <div class="metric-value">${formatInt(m.tokenXferCount)}</div>
+        <div class="metric-value">${countSpan(tokenXferNum, formatInt(m.tokenXferCount))}</div>
         <div class="metric-label">Токен-трансферів</div>
       </div>
       <div class="metric">
-        <div class="metric-value">${appList.length}</div>
+        <div class="metric-value">${countSpan(appList.length, String(appList.length))}</div>
         <div class="metric-label">Застосунків${m.autoLoading ? ' (рахую…)' : ''}</div>
       </div>
+    </div>`;
+
+  // ---- verdict: a simple rank from the metrics above, rules shown in full ----
+  const realAppsCount = appList.filter((p) => !p.crossChain).length;
+  const xcActionsCount = appList.filter((p) => p.crossChain).reduce((s, p) => s + p.actions, 0);
+  const rank = computeRank(m.deployed, txCountNum, realAppsCount, xcActionsCount);
+  const verdict = `
+    <div class="verdict verdict-${rank.key}">
+      <div class="verdict-top">
+        <span class="verdict-badge"><span class="verdict-emoji" aria-hidden="true">${rank.emoji}</span>${escapeHtml(
+    rank.label
+  )}</span>
+        <details class="verdict-rules">
+          <summary>Як рахується ранг?</summary>
+          <ul>
+            <li>🔘 Ще не на радарі — UEA не задеплоєний і без жодної активності</li>
+            <li>🟢 Explorer — UEA задеплоєний, активність є, але ще мало</li>
+            <li>🔵 Builder — 5+ транзакцій і 2+ застосунки, без крос-чейн дій</li>
+            <li>🟣 Universal Native — хоча б одна крос-чейн дія через шлюз Push</li>
+          </ul>
+          <p>Рахується лише з реальних метрик цього UEA, завантажених вище${
+            m.autoLoading ? ' (ще рахуються — ранг може підвищитись)' : ''
+          }.</p>
+        </details>
+      </div>
+      <p class="verdict-reason">${escapeHtml(rank.reason)}</p>
+      ${
+        rank.next
+          ? `<p class="verdict-next">Наступний рівень: ${escapeHtml(rank.next)}</p>`
+          : `<p class="verdict-next verdict-max">Це найвищий рівень у цій версії інструмента.</p>`
+      }
     </div>`;
 
   // ---- universal actions ----
@@ -1274,6 +1460,7 @@ function render() {
       ${reverseNoteHtml}
       ${sdkNote}
       ${metrics}
+      ${verdict}
       ${relayerHtml}
       ${gasHtml}
       ${holdingsHtml}
@@ -1287,6 +1474,8 @@ function render() {
         DONUT.explorer
       )}) та offchain CREATE2 (@pushchain/core) · активність і декодування з Blockscout · крос-чейн напрямок, метод і статус — події UniversalTxOutbound / RescueFundsOnSourceChain через eth_getLogs · ${nowUtc()}</p>
     </div>`;
+
+  animateCountUps(el.result);
 
   const more = document.getElementById('load-more');
   if (more) more.addEventListener('click', () => loadMore());
