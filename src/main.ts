@@ -18,7 +18,8 @@ import {
   type TokenTransfer,
   type PageParams,
 } from './blockscout';
-import { decodeUniversalAction, selectorLabel, type UniversalAction } from './actions';
+import { decodeUniversalAction, selectorLabel, type UniversalAction, type InnerCall } from './actions';
+import { knownAddr, isInfra } from './known';
 import { shortAddr, formatUnits, formatInt, sumGasWei, timeAgo, nowUtc } from './format';
 import { getAddress } from 'viem';
 import './style.css';
@@ -107,6 +108,15 @@ function escapeHtml(s: string): string {
   );
 }
 
+// Ukrainian plural: 1 → one, 2–4 → few, else many (ignoring the teens).
+function plural(n: number, one: string, few: string, many: string): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
 // ---- URL state ----
 function syncUrl(address: string, chainId: string) {
   const u = new URL(window.location.href);
@@ -148,11 +158,24 @@ interface LookupState {
   relayers: Set<string>;
   warnings: string[];
   loadingMore: boolean;
+  // Background auto-pagination (so gas / top apps cover the whole history).
+  autoLoading: boolean;
+  autoPages: number;
+  autoStopped: boolean; // user hit "stop" or the page cap was reached
 }
 
 let state: LookupState | null = null;
+let autoCancel = false;
+// Real decimals per PRC-20 address, learned from Blockscout token-transfer data,
+// so a bridged amount is formatted correctly (USDC/USDT are 6, pETH is 18).
+let tokenDecimals = new Map<string, number>();
 
-const PAGE_CAP = 10; // safety cap for "load all", ~500 items
+function decimalsOf(addr: string | null | undefined): number {
+  if (!addr) return 18;
+  return tokenDecimals.get(addr.toLowerCase()) ?? 18;
+}
+
+const PAGE_CAP = 12; // safety cap for auto / "load all", ~600 items
 
 // ---- Core lookup ----
 async function run() {
@@ -284,11 +307,18 @@ async function run() {
     relayers: new Set(),
     warnings,
     loadingMore: false,
+    autoLoading: false,
+    autoPages: 0,
+    autoStopped: false,
   };
 
   setStatus('', 'muted');
   await resolveNames();
   render();
+
+  // Fetch the rest of the history in the background so gas and the top-apps
+  // summary reflect the whole account, not just the first ~50 items.
+  if (state.txNext || state.tokNext) void autoLoad();
 }
 
 // Collect the real targets (universal-action targets + token counterparties) and
@@ -316,7 +346,11 @@ async function resolveNames() {
     if (other && other.toLowerCase() !== ueaLc && other.toLowerCase() !== ZERO_ADDR) wanted.add(getAddr(other));
   }
 
-  const toFetch = [...wanted].filter((a) => !state!.names.has(a.toLowerCase())).slice(0, 40);
+  // Skip addresses we already have an authoritative SDK label for — no need to
+  // ask the explorer for those.
+  const toFetch = [...wanted]
+    .filter((a) => !state!.names.has(a.toLowerCase()) && !knownAddr(a))
+    .slice(0, 60);
   const results = await Promise.allSettled(toFetch.map((a) => getAddressInfo(a)));
   results.forEach((r, i) => {
     const addr = toFetch[i].toLowerCase();
@@ -338,40 +372,71 @@ function getAddr(a: string): string {
 }
 
 function nameOf(addr: string): NameInfo {
+  // Authoritative SDK label wins over whatever the explorer happens to show.
+  const k = knownAddr(addr);
+  if (k) return { name: k.name, isContract: true };
   return state?.names.get(addr.toLowerCase()) ?? { name: null, isContract: false };
 }
 
-// ---- Load more pages ----
-async function loadMore(all: boolean) {
+// ---- Pagination ----
+/** Fetch the next page of txs and token-transfers (whichever still has one). */
+async function fetchNextPage(): Promise<void> {
+  if (!state) return;
+  const jobs: Promise<void>[] = [];
+  if (state.txNext) {
+    const p = state.txNext;
+    jobs.push(
+      getTransactions(state.uea, p).then((r) => {
+        state!.txs.push(...r.items);
+        state!.txNext = r.next_page_params;
+      })
+    );
+  }
+  if (state.tokNext) {
+    const p = state.tokNext;
+    jobs.push(
+      getTokenTransfers(state.uea, p).then((r) => {
+        state!.tokenTransfers.push(...r.items);
+        state!.tokNext = r.next_page_params;
+      })
+    );
+  }
+  await Promise.allSettled(jobs);
+}
+
+/** Background loader: pulls the rest of the history page by page, re-rendering
+ * after each so the metrics, gas and top-apps summary update live. Stops at the
+ * page cap or when the user hits "stop". */
+async function autoLoad() {
+  if (!state || state.loadingMore) return;
+  autoCancel = false;
+  state.autoPages = 0;
+  state.loadingMore = true;
+  state.autoLoading = true;
+  render();
+  try {
+    while ((state.txNext || state.tokNext) && state.autoPages < PAGE_CAP && !autoCancel) {
+      await fetchNextPage();
+      state.autoPages += 1;
+      await resolveNames();
+      render();
+    }
+  } finally {
+    const capped = !!(state.txNext || state.tokNext);
+    state.autoStopped = capped; // more remains only if we stopped early / hit cap
+    state.loadingMore = false;
+    state.autoLoading = false;
+    render();
+  }
+}
+
+/** Manual single-page "load more" (used after auto stopped at the cap). */
+async function loadMore() {
   if (!state || state.loadingMore) return;
   state.loadingMore = true;
   render();
-  let pages = 0;
   try {
-    do {
-      const jobs: Promise<void>[] = [];
-      if (state.txNext) {
-        const p = state.txNext;
-        jobs.push(
-          getTransactions(state.uea, p).then((r) => {
-            state!.txs.push(...r.items);
-            state!.txNext = r.next_page_params;
-          })
-        );
-      }
-      if (state.tokNext) {
-        const p = state.tokNext;
-        jobs.push(
-          getTokenTransfers(state.uea, p).then((r) => {
-            state!.tokenTransfers.push(...r.items);
-            state!.tokNext = r.next_page_params;
-          })
-        );
-      }
-      if (!jobs.length) break;
-      await Promise.allSettled(jobs);
-      pages += 1;
-    } while (all && (state.txNext || state.tokNext) && pages < PAGE_CAP);
+    await fetchNextPage();
     await resolveNames();
   } finally {
     state.loadingMore = false;
@@ -392,30 +457,87 @@ function render() {
     if (a) actions.push(a);
   }
 
-  // Apps = real targets of universal actions + token counterparties, minus the
-  // UEA, zero address and relayers.
+  // Learn each PRC-20's real decimals from token-transfer rows (Blockscout).
+  for (const tt of m.tokenTransfers) {
+    const addr = tt.token?.address?.toLowerCase();
+    const dec = tt.token?.decimals ?? tt.total?.decimals;
+    if (addr && dec != null && /^\d+$/.test(String(dec))) tokenDecimals.set(addr, Number(dec));
+  }
+
+  // Apps the wallet actually used = targets of universal actions + token
+  // counterparties, grouped and summed. A cross-chain (gateway) action is
+  // grouped by its destination chain, not by the gateway precompile, so the
+  // summary shows "where the wallet bridged to", not the plumbing. Protocol
+  // infrastructure (precompiles, relayer) is left out — it is not an app.
   interface App {
-    addr: string;
+    key: string;
+    label: string;
+    addr: string | null; // explorer link target; null for a cross-chain group
+    chain: string | null; // cross-chain destination chain
+    crossChain: boolean;
     actions: number;
     tokens: number;
     pcWei: bigint;
+    bridged: Map<string, { symbol: string; amount: bigint }>; // token addr → bridged
   }
   const apps = new Map<string, App>();
-  const bump = (addr: string, kind: 'action' | 'token', wei = 0n) => {
-    const lc = addr.toLowerCase();
-    if (lc === ueaLc || lc === ZERO_ADDR || m.relayers.has(getAddr(addr))) return;
-    const prev = apps.get(lc) ?? { addr: getAddr(addr), actions: 0, tokens: 0, pcWei: 0n };
-    if (kind === 'action') prev.actions += 1;
-    else prev.tokens += 1;
-    prev.pcWei += wei;
-    apps.set(lc, prev);
+  const ensure = (key: string, seed: Partial<App>): App => {
+    let a = apps.get(key);
+    if (!a) {
+      a = {
+        key,
+        label: seed.label ?? key,
+        addr: seed.addr ?? null,
+        chain: seed.chain ?? null,
+        crossChain: !!seed.crossChain,
+        actions: 0,
+        tokens: 0,
+        pcWei: 0n,
+        bridged: new Map(),
+      };
+      apps.set(key, a);
+    }
+    return a;
   };
-  for (const a of actions) for (const c of a.calls) bump(c.to, 'action', c.value);
+
+  for (const a of actions) {
+    for (const c of a.calls) {
+      if (c.crossChain) {
+        // Group by destination chain (the real "where did it go").
+        const chain = c.crossChain.chain ?? 'інший чейн';
+        const app = ensure(`xc:${chain}`, {
+          label: `→ ${chain}`,
+          chain,
+          crossChain: true,
+        });
+        app.actions += 1;
+        app.pcWei += c.value;
+        if (c.crossChain.amount > 0n) {
+          const key = c.crossChain.token.toLowerCase();
+          const sym = c.crossChain.tokenSymbol ?? 'токен';
+          const prev = app.bridged.get(key) ?? { symbol: sym, amount: 0n };
+          prev.amount += c.crossChain.amount;
+          app.bridged.set(key, prev);
+        }
+        continue;
+      }
+      const lc = c.to.toLowerCase();
+      if (lc === ueaLc || lc === ZERO_ADDR || isInfra(c.to) || m.relayers.has(getAddr(c.to))) continue;
+      const app = ensure(lc, { addr: getAddr(c.to) });
+      app.actions += 1;
+      app.pcWei += c.value;
+    }
+  }
   for (const tt of m.tokenTransfers) {
     const other = tt.from?.hash?.toLowerCase() === ueaLc ? tt.to?.hash : tt.from?.hash;
-    if (other) bump(other, 'token');
+    if (!other) continue;
+    const lc = other.toLowerCase();
+    if (lc === ueaLc || lc === ZERO_ADDR || isInfra(other) || m.relayers.has(getAddr(other))) continue;
+    ensure(lc, { addr: getAddr(other) }).tokens += 1;
   }
-  const appList = [...apps.values()].sort((a, b) => b.actions + b.tokens - (a.actions + a.tokens));
+  const appList = [...apps.values()].sort(
+    (a, b) => b.actions + b.tokens - (a.actions + a.tokens)
+  );
 
   const tokenSet = new Set(
     m.tokenTransfers.map((tt) => tt.token?.address?.toLowerCase()).filter(Boolean) as string[]
@@ -482,7 +604,7 @@ function render() {
       </div>
       <div class="metric">
         <div class="metric-value">${appList.length}</div>
-        <div class="metric-label">Застосунків (за завантажене)</div>
+        <div class="metric-label">Застосунків${m.autoLoading ? ' (рахую…)' : ''}</div>
       </div>
     </div>`;
 
@@ -490,9 +612,7 @@ function render() {
   const actionsHtml = actions.length
     ? `<section class="block">
         <h3>Універсальні дії <span class="count-badge">${actions.length}</span></h3>
-        <p class="hint">Декодовано з <code>executeUniversalTx</code> — справжній цільовий застосунок кожної дії, а не релеєр. ${
-          appList.length
-        } унікальних цілей за завантажене.</p>
+        <p class="hint">Декодовано з <code>executeUniversalTx</code> — справжній цільовий застосунок кожної дії, а не релеєр. Крос-чейн дії через шлюз показують чейн і контракт призначення (з даних <code>sendUniversalTxOutbound</code>).</p>
         <div class="tx-list">
           ${actions
             .slice(0, 50)
@@ -502,24 +622,43 @@ function render() {
       </section>`
     : '';
 
-  // ---- apps ----
+  // ---- top apps summary (grouped, with per-app totals) ----
   const appsHtml = appList.length
     ? `<section class="block">
-        <h3>Застосунки й контрагенти UEA</h3>
-        <ul class="contacts">
+        <h3>Топ-застосунки UEA <span class="count-badge">${appList.length}</span></h3>
+        <p class="hint">Згруповано за застосунком: скільки дій і скільки PC припало на кожен. Крос-чейн дії зведені за чейном призначення.</p>
+        <ul class="apps">
           ${appList
             .slice(0, 30)
             .map((p) => {
-              const info = nameOf(p.addr);
-              const label = info.name || shortAddr(p.addr, 10, 8);
-              const parts: string[] = [];
-              if (p.actions) parts.push(`${p.actions} дій`);
-              if (p.tokens) parts.push(`${p.tokens} токен`);
-              const pc = p.pcWei > 0n ? ` · ${formatUnits(p.pcWei.toString(), DONUT.nativeDecimals, 4)} PC` : '';
-              return `<li>
-                <a href="${donutAddressUrl(p.addr)}" target="_blank" rel="noopener">${escapeHtml(label)} ↗</a>
-                ${info.isContract ? '<span class="tag">контракт</span>' : ''}
-                <span class="count">${parts.join(' · ')}${pc}</span>
+              const nums: string[] = [];
+              if (p.actions) nums.push(`${p.actions} ${plural(p.actions, 'дія', 'дії', 'дій')}`);
+              if (p.tokens) nums.push(`${p.tokens} ${plural(p.tokens, 'токен', 'токени', 'токенів')}`);
+              if (p.pcWei > 0n) nums.push(`${formatUnits(p.pcWei.toString(), DONUT.nativeDecimals, 4)} PC`);
+              if (p.crossChain) {
+                const bridged = [...p.bridged.entries()]
+                  .map(
+                    ([addr, b]) =>
+                      `${formatUnits(b.amount.toString(), decimalsOf(addr), 4)} ${escapeHtml(b.symbol)}`
+                  )
+                  .join(', ');
+                return `<li class="app app-xc">
+                  <span class="app-name"><span class="xc-badge">крос-чейн</span> ${escapeHtml(p.label)}</span>
+                  <span class="app-nums">${nums.join(' · ')}${
+                  bridged ? ` · міст: ${bridged}` : ''
+                }</span>
+                </li>`;
+              }
+              const info = nameOf(p.addr!);
+              const label = info.name || shortAddr(p.addr!, 10, 8);
+              return `<li class="app">
+                <span class="app-name">
+                  <a href="${donutAddressUrl(p.addr!)}" target="_blank" rel="noopener">${escapeHtml(
+                    label
+                  )} ↗</a>
+                  ${info.isContract ? '<span class="tag">контракт</span>' : ''}
+                </span>
+                <span class="app-nums">${nums.join(' · ')}</span>
               </li>`;
             })
             .join('')}
@@ -616,27 +755,34 @@ function render() {
         з'явиться при першій Universal-транзакції. Адреса вже обчислена й зарезервована.</p>
       </section>`;
 
-  // ---- load-more ----
+  // ---- pagination: background progress + manual fallback ----
   const hasMore = !!(m.txNext || m.tokNext);
-  const loadedNote = `Пораховано з ${m.txs.length} завантажених транзакцій і ${m.tokenTransfers.length} токен-трансферів${
-    hasMore ? '' : ' (усе, що є в експлорера)'
-  }.`;
-  const loadMoreHtml =
-    hasActivity && (hasMore || m.loadingMore)
-      ? `<div class="loadmore">
-          <p class="hint">${loadedNote}</p>
-          ${
-            m.loadingMore
-              ? `<button type="button" class="load-btn" disabled>Завантажую…</button>`
-              : `<button type="button" class="load-btn" id="load-more">Завантажити ще</button>
-                 <button type="button" class="load-btn secondary" id="load-all">Завантажити все (до ${
-                   PAGE_CAP * 50
-                 })</button>`
-          }
-        </div>`
-      : hasActivity
-      ? `<p class="hint">${loadedNote}</p>`
-      : '';
+  const loaded = `${m.txs.length} ${plural(m.txs.length, 'транзакція', 'транзакції', 'транзакцій')} і ${
+    m.tokenTransfers.length
+  } ${plural(m.tokenTransfers.length, 'токен-трансфер', 'токен-трансфери', 'токен-трансферів')}`;
+  let loadMoreHtml = '';
+  if (m.autoLoading) {
+    // Indeterminate progress while we pull the rest of the history in the back.
+    loadMoreHtml = `<div class="loadmore">
+      <div class="progress"><div class="progress-bar"></div></div>
+      <p class="hint">Фоново завантажую всю історію… сторінка ${m.autoPages + 1}, уже ${loaded}. Газ і топ-застосунки оновлюються наживо.
+        <button type="button" class="load-btn ghost" id="load-stop">Зупинити</button>
+      </p>
+    </div>`;
+  } else if (m.loadingMore) {
+    loadMoreHtml = `<div class="loadmore"><button type="button" class="load-btn" disabled>Завантажую…</button></div>`;
+  } else if (hasActivity && hasMore) {
+    // Auto-load stopped at the page cap but more remains.
+    loadMoreHtml = `<div class="loadmore">
+      <p class="hint">Показано перші ${loaded}${
+      m.autoStopped ? ` (ліміт автозавантаження — ${PAGE_CAP} сторінок)` : ''
+    }. Є ще — підвантажити?</p>
+      <button type="button" class="load-btn" id="load-more">Завантажити ще сторінку</button>
+      <button type="button" class="load-btn secondary" id="load-all">Завантажити все, що лишилось</button>
+    </div>`;
+  } else if (hasActivity) {
+    loadMoreHtml = `<p class="hint">Пораховано за всю історію: ${loaded} (усе, що є в експлорера).</p>`;
+  }
 
   const warningsHtml = m.warnings.length
     ? `<section class="block warn">
@@ -669,9 +815,13 @@ function render() {
     </div>`;
 
   const more = document.getElementById('load-more');
-  if (more) more.addEventListener('click', () => loadMore(false));
+  if (more) more.addEventListener('click', () => loadMore());
   const allBtn = document.getElementById('load-all');
-  if (allBtn) allBtn.addEventListener('click', () => loadMore(true));
+  if (allBtn) allBtn.addEventListener('click', () => autoLoad());
+  const stopBtn = document.getElementById('load-stop');
+  if (stopBtn) stopBtn.addEventListener('click', () => {
+    autoCancel = true;
+  });
 }
 
 function renderAction(a: UniversalAction): string {
@@ -688,23 +838,57 @@ function renderAction(a: UniversalAction): string {
   }
   // One row per inner call (direct → single row; multicall → several).
   return a.calls
-    .map((c, i) => {
-      const info = nameOf(c.to);
-      const label = info.name || shortAddr(c.to, 8, 6);
-      const method = selectorLabel(c.selector) || (c.selector ? c.selector : '—');
-      const pc = c.value > 0n ? `${formatUnits(c.value.toString(), DONUT.nativeDecimals, 4)} PC` : '';
-      const tag = a.isMulticall && a.calls.length > 1 ? `<span class="idx">${i + 1}/${a.calls.length}</span>` : '';
-      return `<a class="tx" href="${donutTxUrl(a.txHash)}" target="_blank" rel="noopener" title="Ціль: ${escapeHtml(
-        c.to
-      )}">
-        <span class="tx-dir out">→APP</span>
-        <span class="tx-method">${escapeHtml(method)}${tag}</span>
-        <span class="tx-counter">${escapeHtml(label)}</span>
-        <span class="tx-val">${pc}</span>
-        <span class="tx-time">${status}${time}</span>
-      </a>`;
-    })
+    .map((c, i) => renderCall(a, c, i, status, time))
     .join('');
+}
+
+function renderCall(
+  a: UniversalAction,
+  c: InnerCall,
+  i: number,
+  status: string,
+  time: string
+): string {
+  const tag = a.isMulticall && a.calls.length > 1 ? `<span class="idx">${i + 1}/${a.calls.length}</span>` : '';
+
+  // Cross-chain (gateway outbound): show where it actually went, not the gateway.
+  if (c.crossChain) {
+    const x = c.crossChain;
+    const chain = x.chain ?? 'інший чейн';
+    const dest = x.recipient ? ` · ${escapeHtml(shortAddr(x.recipient, 8, 6))}` : '';
+    const kind = x.hasPayload ? 'крос-чейн виклик' : 'крос-чейн переказ';
+    const bridged =
+      x.amount > 0n
+        ? `${formatUnits(x.amount.toString(), decimalsOf(x.token), 4)} ${escapeHtml(
+            x.tokenSymbol ?? 'токен'
+          )}`
+        : x.tokenSymbol
+        ? escapeHtml(x.tokenSymbol)
+        : '';
+    return `<a class="tx tx-xc" href="${donutTxUrl(a.txHash)}" target="_blank" rel="noopener" title="Шлюз → ${escapeHtml(
+      chain
+    )}${x.recipient ? ` · отримувач ${escapeHtml(x.recipient)}` : ''}">
+      <span class="tx-dir xc">⇄ CC</span>
+      <span class="tx-method">${kind}${tag}</span>
+      <span class="tx-counter">→ ${escapeHtml(chain)}${dest}</span>
+      <span class="tx-val">${bridged}</span>
+      <span class="tx-time">${status}${time}</span>
+    </a>`;
+  }
+
+  const info = nameOf(c.to);
+  const label = info.name || shortAddr(c.to, 8, 6);
+  const method = selectorLabel(c.selector) || (c.selector ? c.selector : '—');
+  const pc = c.value > 0n ? `${formatUnits(c.value.toString(), DONUT.nativeDecimals, 4)} PC` : '';
+  return `<a class="tx" href="${donutTxUrl(a.txHash)}" target="_blank" rel="noopener" title="Ціль: ${escapeHtml(
+    c.to
+  )}">
+    <span class="tx-dir out">→APP</span>
+    <span class="tx-method">${escapeHtml(method)}${tag}</span>
+    <span class="tx-counter">${escapeHtml(label)}</span>
+    <span class="tx-val">${pc}</span>
+    <span class="tx-time">${status}${time}</span>
+  </a>`;
 }
 
 // On GitHub Pages the repo link can be derived from the URL

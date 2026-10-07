@@ -10,7 +10,12 @@ link to the Donut explorer for every on-chain item.
 It also works **in reverse**: paste a UEA address that is already on Push Chain and it tells
 you which origin wallet and chain it belongs to (asked straight from the Push factory), and it
 **decodes each `executeUniversalTx`** to show the real target application of every universal
-action — not just the relayer and token contracts a plain explorer stops at.
+action — not just the relayer and token contracts a plain explorer stops at. For cross-chain
+actions it decodes the gateway call (`sendUniversalTxOutbound`) to show **which chain and which
+contract** the universal call was routed to. Actions are **grouped per app**, so you see at a
+glance the wallet's main integrations (how many calls and how much PC each), and the full
+history is **auto-loaded in the background** so gas and the top-apps totals cover everything,
+not just the first page.
 
 It is a **read-only** static site. There is **no wallet connect, no signing, no
 transactions, no backend, and no API keys** — everything is computed in your browser from
@@ -51,11 +56,13 @@ tool shows.
 3. The tool reads the UEA's activity from the public Donut Blockscout API and **decodes each
    `executeUniversalTx`** (with viem) to find the real target app of every universal action,
    including the ones batched inside a UEA multicall.
-4. You get the origin ↔ UEA mapping, deploy status, metrics, the decoded universal actions, the
-   real apps/counterparties (the relayer is shown separately as infrastructure) and a token /
-   transaction history, each linking to the Donut explorer.
-5. **Load more / Load all** pages the full history through Blockscout’s `next_page_params`, so
-   gas and the app list are computed over everything, not just the last ~50 items.
+4. You get the origin ↔ UEA mapping, deploy status, metrics, the decoded universal actions
+   (cross-chain ones showing their destination chain + contract), a **grouped top-apps summary**
+   with per-app call count and PC spent (the relayer and protocol precompiles are excluded as
+   infrastructure), and a token / transaction history, each linking to the Donut explorer.
+5. The rest of the history is **loaded automatically in the background** (progress shown), so
+   gas and the top-apps totals reflect the whole account. You can stop it, and for very large
+   accounts a manual “load more / load all” continues past the auto-load cap.
 6. The URL carries `?address=…&chain=…`, so any result is shareable.
 
 ## Data sources
@@ -73,7 +80,11 @@ tool shows.
   — sends CORS headers. Read-only; nothing is signed or sent.
 - **Universal action targets** — decoded in-browser with `viem` from each transaction's
   `raw_input` (the `executeUniversalTx` payload, and the `(address,uint256,bytes)[]` of a UEA
-  multicall). Target contract names come from Blockscout. When an inner call cannot be decoded
+  multicall). When an inner call targets the gateway precompile, its `sendUniversalTxOutbound`
+  argument is decoded too: the bridged PRC-20 `token` identifies the **destination chain** (via
+  the SDK's synthetic-token map) and `recipient` the **destination contract** (EVM address or
+  Solana pubkey). Contract names come from the SDK's own address book (gateway, UniswapV3,
+  synthetic tokens, factory) first, then Blockscout. When an inner call cannot be decoded
   cleanly it is shown as an undecoded action rather than guessed.
 
 Every result footer shows the data source and the time it was read. When a source fails,
@@ -101,10 +112,16 @@ The static site is built into `docs/` so GitHub Pages can serve it as-is.
 
 - Testnet data. Balances and counts are whatever the Donut Blockscout indexer reports at
   the moment you look.
-- The app list, universal-action list and gas are computed over the pages you have **loaded**.
-  The first page (up to ~50 of each) loads automatically; “Load more / Load all” pulls the rest
-  through Blockscout's pagination (capped at 500 items for “Load all”). The headline
-  “transactions / token-transfers total” counters are the true lifetime totals from the API.
+- The app list, universal-action list and gas are computed over the pages that are **loaded**.
+  After the first page the tool auto-pages the rest in the background through Blockscout's
+  `next_page_params` (capped at ~600 items / 12 pages to bound requests); past that cap a manual
+  “load more / load all” continues. The headline “transactions / token-transfers total”
+  counters are the true lifetime totals from the API regardless of how much is loaded.
+- A cross-chain action's destination **chain** comes from the bridged synthetic PRC-20 token
+  (the SDK maps each one to its origin chain); the exact `chainNamespace` string is not in the
+  calldata, so the label is derived from the token, and the destination **contract** is the raw
+  `recipient` from the gateway call. Bridged amounts use each token's real decimals when the
+  explorer has reported them, else default to 18.
 - "Gas paid by the UEA" counts only the UEA's own outgoing transactions; most UEAs are
   funded by a relayer (shown separately), so this is often 0 — the tool only shows it when
   it is non-zero.

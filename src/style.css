@@ -241,3 +241,46 @@ button[type="submit"]:hover { filter: brightness(1.08); }
   margin-left: 8px;
 }
 .loadmore > .load-btn + .load-btn { margin-top: -0px; }
+
+/* ---- round 2 additions: cross-chain, top-apps summary, auto-pagination ---- */
+
+/* cross-chain (gateway outbound) action rows */
+.tx-dir.xc { background: rgba(139, 92, 246, 0.22); color: var(--accent-2); }
+.tx-xc { border-color: rgba(139, 92, 246, 0.4); }
+.tx-xc .tx-counter { color: var(--accent-2); }
+
+/* top-apps summary */
+.apps { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.app {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  background: var(--card-2); border: 1px solid var(--line); border-radius: 9px; padding: 8px 12px;
+}
+.app-name { font-family: ui-monospace, monospace; font-size: 14px; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.app-name a { color: var(--accent); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-nums { color: var(--muted); font-size: 12px; white-space: nowrap; text-align: right; }
+.app-xc { border-color: rgba(139, 92, 246, 0.4); }
+.app-xc .app-name { color: var(--accent-2); }
+.xc-badge {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
+  color: var(--accent-2); background: rgba(139, 92, 246, 0.16);
+  border: 1px solid rgba(139, 92, 246, 0.4); border-radius: 6px; padding: 1px 6px;
+}
+
+/* background auto-pagination progress */
+.progress { height: 5px; width: 100%; background: var(--bg-2); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.progress-bar {
+  height: 100%; width: 40%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  animation: slide 1.1s ease-in-out infinite;
+}
+@keyframes slide {
+  0% { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+.load-btn.ghost {
+  background: transparent; border: 1px solid var(--line); color: var(--muted);
+  padding: 3px 10px; font-size: 12px; font-weight: 500; margin-left: 8px;
+}
+@media (max-width: 560px) {
+  .app-name a { max-width: 140px; }
+}

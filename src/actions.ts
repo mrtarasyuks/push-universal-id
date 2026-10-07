@@ -1,5 +1,7 @@
 import { decodeFunctionData, decodeAbiParameters, getAddress } from 'viem';
+import bs58 from 'bs58';
 import type { Tx } from './blockscout';
+import { tokenMeta } from './known';
 
 // Decodes what a UEA actually did on Push Chain. The relayer submits a tx that
 // calls `executeUniversalTx(payload, signature)` on the UEA; the real target app
@@ -13,6 +15,13 @@ export const EXECUTE_UNIVERSAL_TX_SELECTOR = '0xa84813a4';
 /** bytes4(keccak256("UEA_MULTICALL")) — marks a UEA multicall in payload.data.
  * Source: @pushchain/core selectors (UEA_MULTICALL_SELECTOR). */
 const UEA_MULTICALL_SELECTOR = '0x2cc2842d';
+
+/** Selector of UniversalGatewayPC.sendUniversalTxOutbound((bytes,address,uint256,
+ * uint256,uint256,uint256,bytes,address)) — a cross-chain (outbound) call. The
+ * `token` (a synthetic PRC-20) tells us the destination chain, and `recipient`
+ * the destination contract/address on it. Source: @pushchain/core
+ * constants/abi/universalGatewayPC.evm. */
+const SEND_OUTBOUND_SELECTOR = '0x77b86bec';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 
@@ -54,12 +63,57 @@ const MULTICALL_ABI = [
   },
 ] as const;
 
+const OUTBOUND_ABI = [
+  {
+    type: 'function',
+    name: 'sendUniversalTxOutbound',
+    stateMutability: 'payable',
+    inputs: [
+      {
+        name: 'req',
+        type: 'tuple',
+        components: [
+          { name: 'recipient', type: 'bytes' },
+          { name: 'token', type: 'address' },
+          { name: 'amount', type: 'uint256' },
+          { name: 'gasLimit', type: 'uint256' },
+          { name: 'gasPrice', type: 'uint256' },
+          { name: 'maxPCForGas', type: 'uint256' },
+          { name: 'payload', type: 'bytes' },
+          { name: 'revertRecipient', type: 'address' },
+        ],
+      },
+    ],
+    outputs: [],
+  },
+] as const;
+
+/** Where a cross-chain (gateway) universal action actually went. */
+export interface CrossChain {
+  /** Destination chain, derived from the bridged PRC-20 token (SDK mapping). */
+  chain: string | null;
+  /** Human symbol of the bridged token, e.g. "USDC". */
+  tokenSymbol: string | null;
+  /** The PRC-20 token address on Push Chain. */
+  token: string;
+  /** Amount of the token bridged (raw units of that token). */
+  amount: bigint;
+  /** Destination contract/address on the target chain (checksummed EVM or
+   * base58 Solana), or null when funds are routed to the caller's own account. */
+  recipient: string | null;
+  /** true when `payload` is non-empty — a cross-chain contract call, not a
+   * plain funds transfer. */
+  hasPayload: boolean;
+}
+
 export interface InnerCall {
   /** The real target contract this universal action called on Push Chain. */
   to: string;
   value: bigint;
   /** 4-byte selector of the inner calldata (method on the target), or ''. */
   selector: string;
+  /** Present when `to` is the gateway and the call is a cross-chain outbound. */
+  crossChain?: CrossChain;
 }
 
 export interface UniversalAction {
@@ -106,16 +160,72 @@ export function decodeUniversalAction(tx: Tx): UniversalAction | null {
     try {
       const [arr] = decodeAbiParameters(MULTICALL_ABI, ('0x' + data.slice(10)) as `0x${string}`);
       for (const c of arr as Array<{ to: string; value: bigint; data: string }>) {
-        calls.push({ to: safeAddr(c.to), value: c.value, selector: selOf(c.data) });
+        calls.push(makeCall(c.to, c.value, c.data));
       }
     } catch {
       // Keep the action but with no decoded inner calls rather than inventing.
     }
   } else if (to && to.toLowerCase() !== ZERO) {
-    calls.push({ to: safeAddr(to), value, selector: selOf(data) });
+    calls.push(makeCall(to, value, data));
   }
 
   return { txHash: tx.hash, timestamp: tx.timestamp, ok: tx.status !== 'error', value, isMulticall, calls };
+}
+
+/** Build an InnerCall, decoding a cross-chain destination when the call is a
+ * gateway outbound (selector 0x77b86bec). */
+function makeCall(to: string, value: bigint, data: string): InnerCall {
+  const call: InnerCall = { to: safeAddr(to), value, selector: selOf(data) };
+  if (call.selector === SEND_OUTBOUND_SELECTOR) {
+    const cross = decodeOutbound(data);
+    if (cross) call.crossChain = cross;
+  }
+  return call;
+}
+
+/** Decode sendUniversalTxOutbound calldata into a cross-chain destination:
+ * destination chain (from the bridged PRC-20 token), recipient and amount.
+ * Returns null when it cannot be decoded cleanly — never guessed. */
+function decodeOutbound(data: string): CrossChain | null {
+  try {
+    const decoded = decodeFunctionData({ abi: OUTBOUND_ABI, data: data as `0x${string}` });
+    const req = decoded.args[0] as {
+      recipient: string;
+      token: string;
+      amount: bigint;
+      payload: string;
+    };
+    const meta = tokenMeta(req.token);
+    return {
+      chain: meta?.chain ?? null,
+      tokenSymbol: meta?.symbol ?? null,
+      token: safeAddr(req.token),
+      amount: req.amount,
+      recipient: decodeRecipient(req.recipient),
+      hasPayload: !!req.payload && req.payload.length > 2,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// The gateway's `recipient` is raw bytes for the destination chain: 20 bytes for
+// an EVM address, 32 bytes for a Solana pubkey (base58), or zero/empty when the
+// protocol routes funds back to the caller's own account.
+function decodeRecipient(recipient: string | undefined): string | null {
+  if (!recipient || recipient === '0x') return null;
+  const hex = recipient.toLowerCase().replace(/^0x/, '');
+  if (/^0+$/.test(hex)) return null;
+  const bytes = hex.length / 2;
+  if (bytes === 20) return safeAddr('0x' + hex);
+  if (bytes === 32) {
+    try {
+      return bs58.encode(Uint8Array.from(hex.match(/../g)!.map((h) => parseInt(h, 16))));
+    } catch {
+      return '0x' + hex;
+    }
+  }
+  return '0x' + hex;
 }
 
 function safeAddr(a: string): string {
