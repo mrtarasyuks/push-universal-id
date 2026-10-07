@@ -1,5 +1,9 @@
 import { CHAIN, chainMeta } from './uea';
-import { CHAIN_INFO } from '@pushchain/core/src/lib/constants/chain';
+import {
+  CHAIN_INFO,
+  UNIVERSAL_GATEWAY_ADDRESSES,
+  VAULT_ADDRESSES,
+} from '@pushchain/core/src/lib/constants/chain';
 
 export type VmKind = 'evm' | 'svm';
 
@@ -129,6 +133,50 @@ export function destExplorerUrl(caip: string | null | undefined, recipient: stri
   // Solana Explorer needs the cluster for a testnet/devnet pubkey.
   const url = def.vm === 'svm' ? `${base}/address/${recipient}?cluster=devnet` : `${base}/address/${recipient}`;
   return { url, label: def.label };
+}
+
+/** Everything needed to confirm a cross-chain delivery on the destination chain:
+ * its public RPC urls, the UniversalGateway + Vault that emit the settlement
+ * events, a destination-tx explorer link builder and a label. All sourced from
+ * the SDK's own constants. Returns null for a chain we do not list or a non-EVM
+ * one (eth_getLogs does not apply to Solana), so the caller skips confirmation
+ * honestly instead of guessing. */
+export interface DestConfig {
+  label: string;
+  vm: VmKind;
+  rpcUrls: string[];
+  /** Gateway + Vault addresses on the destination chain (either may be absent). */
+  contracts: string[];
+  explorerTxUrl: (hash: string) => string | null;
+}
+
+export function destConfig(caip: string | null | undefined): DestConfig | null {
+  if (!caip) return null;
+  const i = caip.lastIndexOf(':');
+  if (i < 0) return null;
+  const namespace = caip.slice(0, i);
+  const chainId = caip.slice(i + 1);
+  const def = findChainByCaip(namespace, chainId);
+  if (!def || def.vm !== 'evm') return null; // only EVM destinations can be queried via eth_getLogs
+  const info = CHAIN_INFO[def.chain];
+  const rpcUrls = (info?.defaultRPC ?? []).filter(
+    (u, idx, arr) => /^https?:\/\//.test(u) && arr.indexOf(u) === idx
+  );
+  if (!rpcUrls.length) return null;
+  const key = `${namespace}:${chainId}`;
+  const contracts = [
+    (UNIVERSAL_GATEWAY_ADDRESSES as Record<string, string>)[key],
+    (VAULT_ADDRESSES as Record<string, string>)[key],
+  ].filter((a): a is string => !!a && /^0x[0-9a-fA-F]{40}$/.test(a));
+  if (!contracts.length) return null;
+  const base = explorerBase(def.chain);
+  return {
+    label: def.label,
+    vm: def.vm,
+    rpcUrls,
+    contracts,
+    explorerTxUrl: (hash: string) => (base ? `${base}/tx/${hash}` : null),
+  };
 }
 
 // ---- Donut testnet facts (from the SDK's own constants) ----

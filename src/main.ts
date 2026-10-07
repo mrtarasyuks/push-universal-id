@@ -4,6 +4,7 @@ import {
   findChainByCaip,
   chainLabelFromNamespace,
   destExplorerUrl,
+  destConfig,
   REVERSE_ID,
   DONUT,
   donutAddressUrl,
@@ -17,23 +18,29 @@ import {
   getTokenTransfers,
   getTokenBalances,
   getLogs,
+  rpcGetLogs,
   isNotFound,
   type Tx,
   type TokenTransfer,
   type TokenBalance,
   type PageParams,
+  type RpcLog,
 } from './blockscout';
 import {
   decodeUniversalAction,
   decodeOutboundEvent,
   decodeRescueEvent,
+  decodeDeliveryLog,
+  pcUniversalTxId,
   selectorLabel,
   OUTBOUND_EVENT_TOPIC0,
   RESCUE_EVENT_TOPIC0,
+  DEST_EVENT_TOPICS,
   type UniversalAction,
   type InnerCall,
   type OutboundEvent,
   type RescueEvent,
+  type DeliveryLog,
 } from './actions';
 import { knownAddr, isInfra, tokenMeta, GATEWAY_PC_ADDRESS } from './known';
 import { shortAddr, formatUnits, formatInt, sumGasWei, timeAgo, nowUtc } from './format';
@@ -197,12 +204,29 @@ interface LookupState {
   // to flag a cross-chain direction as "reverted / funds rescued".
   rescues: RescueEvent[];
   rescueKeys: Set<string>;
+  // Destination-chain delivery confirmation, keyed by a cross-chain sub-tx's
+  // subTxId. Present only when positively confirmed from the destination chain's
+  // own RPC (its UniversalTxExecuted/Finalized → delivered, Reverted/Rescued →
+  // bounced); absent means "not confirmed from the destination" (still in flight,
+  // or that chain's RPC was unreachable / blocked CORS). `deliveryChecked` tracks
+  // subTxIds already queried so we never re-query one.
+  delivery: Map<string, DeliveryStatus>;
+  deliveryChecked: Set<string>;
+  deliveryActive: boolean; // a background confirmation pass is running
   warnings: string[];
   loadingMore: boolean;
   // Background auto-pagination (so gas / top apps cover the whole history).
   autoLoading: boolean;
   autoPages: number;
   autoStopped: boolean; // user hit "stop" or the page cap was reached
+}
+
+/** A confirmed destination-chain outcome for one cross-chain sub-tx. */
+interface DeliveryStatus {
+  ok: boolean; // true = arrived (Executed/Finalized), false = bounced (Reverted/Rescued)
+  destTxHash: string; // the settling tx hash on the destination chain
+  destTxUrl: string | null; // link to that tx on the destination chain's explorer
+  chainLabel: string;
 }
 
 let state: LookupState | null = null;
@@ -214,6 +238,12 @@ let tokenDecimals = new Map<string, number>();
 function decimalsOf(addr: string | null | undefined): number {
   if (!addr) return 18;
   return tokenDecimals.get(addr.toLowerCase()) ?? 18;
+}
+
+// A near-max uint256 (any value ≥ 2^255) is an "infinite" approval in practice;
+// show it as ∞ rather than a 77-digit number.
+function isUnlimited(n: bigint): boolean {
+  return n >= 1n << 255n;
 }
 
 const PAGE_CAP = 12; // safety cap for auto / "load all", ~600 items
@@ -361,6 +391,9 @@ async function run() {
     outboundFetched: new Set(),
     rescues: [],
     rescueKeys: new Set(),
+    delivery: new Map(),
+    deliveryChecked: new Set(),
+    deliveryActive: false,
     warnings,
     loadingMore: false,
     autoLoading: false,
@@ -473,10 +506,12 @@ function resolveOutboundChains(): Promise<void> {
   return outboundQueue;
 }
 
-/** Re-render after resolving (used for the background initial pass). */
+/** Re-render after resolving (used for the background initial pass), then confirm
+ * each cross-chain delivery on its destination chain. */
 async function refreshOutbound(): Promise<void> {
   await resolveOutboundChains();
   render();
+  void runDeliveries();
 }
 
 async function doResolveOutbound(): Promise<void> {
@@ -557,11 +592,107 @@ async function doResolveOutbound(): Promise<void> {
   for (const p of pending) m.outboundFetched.add(p.hash);
 }
 
+// ---- Destination-chain delivery confirmation ----
+// The Push side proves only that an outbound was *sent*. The authoritative "it
+// arrived" is on the destination chain: its UniversalGateway/Vault emit
+// UniversalTxExecuted / UniversalTxFinalized (arrived) or UniversalTxReverted /
+// FundsRescued (bounced), each carrying the SAME subTxId as our Push-side
+// outbound event. We confirm a sub-tx by querying the destination chain's own
+// public RPC (from the SDK) for a log with that subTxId — best-effort: if that
+// chain's RPC is unreachable or blocks CORS from the browser, the sub-tx simply
+// stays "not confirmed from destination" and we keep the honest Push-side signal.
+const DELIVERY_CAP = 24; // bound the external calls a single lookup makes
+const ZERO_BYTES32 = '0x' + '0'.repeat(64);
+
+let deliveryQueue: Promise<void> = Promise.resolve();
+
+function runDeliveries(): Promise<void> {
+  deliveryQueue = deliveryQueue
+    .then(async () => {
+      const m = state;
+      if (!m) return;
+      m.deliveryActive = true;
+      render();
+      try {
+        await confirmDeliveries();
+      } finally {
+        if (state === m) {
+          m.deliveryActive = false;
+          render();
+        }
+      }
+    })
+    .catch(() => {});
+  return deliveryQueue;
+}
+
+async function confirmDeliveries(): Promise<void> {
+  const m = state;
+  if (!m) return;
+
+  // Distinct, not-yet-checked cross-chain sub-txs, with the destination chain the
+  // gateway event named. An outbound event only exists for a successful send, so
+  // its presence already means "sent" — we need only its destination fate.
+  const targets: { subTxId: string; caip: string }[] = [];
+  for (const arr of m.outbound.values()) {
+    for (const ev of arr) {
+      const sid = ev.subTxId?.toLowerCase();
+      if (!sid || sid === ZERO_BYTES32) continue;
+      if (m.deliveryChecked.has(sid) || m.delivery.has(sid)) continue;
+      if (targets.some((t) => t.subTxId === sid)) continue;
+      targets.push({ subTxId: sid, caip: ev.chainNamespace });
+    }
+  }
+  if (!targets.length) return;
+
+  for (const t of targets.slice(0, DELIVERY_CAP)) {
+    if (state !== m) return; // a newer lookup replaced us
+    const cfg = destConfig(t.caip);
+    m.deliveryChecked.add(t.subTxId); // do not re-query, success or not
+    if (!cfg) continue; // non-EVM / unknown chain — cannot read via eth_getLogs
+
+    // Filter by the settlement-event signatures (topic0 OR-set) AND the exact
+    // subTxId (topic1): a normal EVM node does this positional AND for us. Try
+    // each public RPC until one actually answers (null = could not query).
+    let logs: RpcLog[] | null = null;
+    for (const url of cfg.rpcUrls) {
+      logs = await rpcGetLogs(url, {
+        address: cfg.contracts,
+        topics: [DEST_EVENT_TOPICS, t.subTxId],
+      });
+      if (logs !== null) break;
+    }
+    if (!logs || !logs.length) continue; // unreachable, or nothing settled yet
+
+    let chosen: DeliveryLog | null = null;
+    for (const lg of logs) {
+      const d = decodeDeliveryLog(lg);
+      if (!d || d.subTxId !== t.subTxId) continue;
+      // A success (Executed/Finalized) is the terminal truth; prefer it.
+      if (!chosen || (d.ok && !chosen.ok)) chosen = d;
+    }
+    if (chosen) {
+      m.delivery.set(t.subTxId, {
+        ok: chosen.ok,
+        destTxHash: chosen.destTxHash,
+        destTxUrl: cfg.explorerTxUrl(chosen.destTxHash),
+        chainLabel: cfg.label,
+      });
+    }
+  }
+}
+
 /** Stamp each cross-chain inner call with its exact destination chain, the exact
- * CAIP namespace and the destination method — all from the gateway's own
- * UniversalTxOutbound event — plus a "rescued" flag when a RescueFundsOnSourceChain
- * event matches its direction. Within a tx, events are matched to calls by token
- * first, then in log order — so several bridges in one tx map correctly. */
+ * CAIP namespace, the destination method (selector + decoded args) and the
+ * outbound `subTxId` — all from the gateway's own UniversalTxOutbound event —
+ * plus a "rescued" flag. Within a tx, events are matched to calls by token first,
+ * then in log order, so several bridges in one tx map correctly.
+ *
+ * Rescue binding is by shared id, not by direction: the action's own universalTxId
+ * is sha256("<pushCaip>:<pushTxHash>") (the chain's GetPcUniversalTxKey), and the
+ * gateway's RescueFundsOnSourceChain indexes that exact universalTxId — so the
+ * "повернуто" flag lands on the specific action that bounced, together with a
+ * token+chain check, instead of smearing across every action to that chain. */
 function attachExactChains(actions: UniversalAction[]): void {
   if (!state) return;
   for (const a of actions) {
@@ -578,23 +709,28 @@ function attachExactChains(actions: UniversalAction[]): void {
         const ev = events[idx];
         c.crossChain.exactChain = chainLabelFromNamespace(ev.chainNamespace);
         c.crossChain.exactNamespace = ev.chainNamespace;
-        // The event's payload selector is authoritative; prefer it over the one
+        c.crossChain.subTxId = ev.subTxId;
+        // The event's payload decode is authoritative; prefer it over the one
         // decoded from calldata (identical bytes, but this ties to the ✓ chain).
-        if (ev.destSelector) c.crossChain.destSelector = ev.destSelector;
+        if (ev.destCall) c.crossChain.destCall = ev.destCall;
       }
     }
-    // Flag the direction as rescued when a rescue event matches this UEA's token
-    // and destination chain. Matched by direction, not by a shared id.
+    // Bind rescue to this exact action by its universalTxId (deterministic from
+    // the action's own tx hash), narrowed further by token + destination chain.
     if (state.rescues.length) {
-      for (const c of a.calls) {
-        if (!c.crossChain) continue;
-        const tok = c.crossChain.token.toLowerCase();
-        const label = c.crossChain.exactChain ?? c.crossChain.chain ?? null;
-        c.crossChain.rescued = state.rescues.some(
-          (r) =>
-            r.token.toLowerCase() === tok &&
-            (!label || chainLabelFromNamespace(r.chainNamespace) === label)
-        );
+      const uid = pcUniversalTxId(a.txHash).toLowerCase();
+      const matched = state.rescues.filter((r) => r.universalTxId === uid);
+      if (matched.length) {
+        for (const c of a.calls) {
+          if (!c.crossChain) continue;
+          const tok = c.crossChain.token.toLowerCase();
+          const label = c.crossChain.exactChain ?? c.crossChain.chain ?? null;
+          c.crossChain.rescued = matched.some(
+            (r) =>
+              r.token.toLowerCase() === tok &&
+              (!label || chainLabelFromNamespace(r.chainNamespace) === label)
+          );
+        }
       }
     }
   }
@@ -643,6 +779,7 @@ async function autoLoad() {
       await resolveNames();
       await resolveOutboundChains();
       render();
+      void runDeliveries();
     }
   } finally {
     const capped = !!(state.txNext || state.tokNext);
@@ -665,6 +802,7 @@ async function loadMore() {
   } finally {
     state.loadingMore = false;
     render();
+    void runDeliveries();
   }
 }
 
@@ -862,7 +1000,9 @@ function render() {
   const actionsHtml = actions.length
     ? `<section class="block">
         <h3>Універсальні дії <span class="count-badge">${actions.length}</span></h3>
-        <p class="hint">Декодовано з <code>executeUniversalTx</code> — справжній цільовий застосунок кожної дії, а не релеєр. Крос-чейн дії через шлюз показують чейн, метод і контракт призначення, статус (надіслано / повернуто / не виконано) та пряме посилання на експлорер чейна-призначення («кінець мосту»).</p>
+        <p class="hint">Декодовано з <code>executeUniversalTx</code> — справжній цільовий застосунок кожної дії, а не релеєр. Крос-чейн дії через шлюз показують чейн, метод і аргументи виклику на призначенні, статус доставки та пряме посилання на експлорер чейна-призначення («кінець мосту»). Доставку <strong>підтверджуємо на самому чейні призначення</strong> (його RPC із SDK): подія <code>UniversalTxExecuted/Finalized</code> з тим самим <code>subTxId</code> = ✓ доставлено.${
+          m.deliveryActive ? ' <span class="muted">Перевіряю доставку на чейнах призначення…</span>' : ''
+        }</p>
         <div class="tx-list">
           ${actions
             .slice(0, 50)
@@ -1180,7 +1320,8 @@ function renderCall(
     const dest = x.recipient ? ` · ${escapeHtml(shortAddr(x.recipient, 8, 6))}` : '';
     // The method this action invokes on the destination contract, decoded from
     // the outbound payload (empty payload = a plain transfer, so no method).
-    const methodName = x.destSelector ? selectorLabel(x.destSelector) || x.destSelector : '';
+    const dc = x.destCall;
+    const methodName = dc ? dc.method || dc.selector : '';
     const kind = x.hasPayload
       ? `крос-чейн виклик${methodName ? ` · ${escapeHtml(methodName)}()` : ''}`
       : 'крос-чейн переказ';
@@ -1196,23 +1337,54 @@ function renderCall(
         ? escapeHtml(x.tokenSymbol)
         : '';
 
-    // Status of the cross-chain action, from signals we can read on Push:
-    //  • the executeUniversalTx itself reverted → nothing was sent;
-    //  • the gateway rescued the funds back → delivery to the destination failed;
-    //  • otherwise it was sent — final delivery is confirmed on the destination
-    //    chain, which the explorer link below lets the user check directly.
-    const st = !a.ok
-      ? { cls: 'st-fail', text: '✗ не виконано (Push)', title: 'executeUniversalTx завершився помилкою на Push — крос-чейн дію не відправлено.' }
-      : x.rescued
-      ? { cls: 'st-rescued', text: '↩ повернуто (rescue)', title: 'Шлюз емітив RescueFundsOnSourceChain для цього напрямку (той самий UEA, токен і чейн): кошти повернулись на Push, тобто доставка на призначення не завершилась. Збіг за напрямком, не за точним subTxId.' }
-      : { cls: 'st-sent', text: '↗ надіслано', title: 'Крос-чейн дію надіслано зі шлюзу Push. Фінальне виконання підтверджується на боці призначення — відкрий отримувача в експлорері призначення.' };
+    // Decoded arguments of the destination method (recipient + amount for the
+    // standard ERC-20 calls) — "what exactly it does on the destination", not
+    // just the selector. Only shown when we could decode them unambiguously.
+    let callDetail = '';
+    if (dc && dc.recipient) {
+      const who = dc.selector === '0x095ea7b3' ? 'spender' : 'отримувач';
+      const amt =
+        dc.amount == null
+          ? ''
+          : ` · ${isUnlimited(dc.amount) ? '∞' : formatUnits(dc.amount.toString(), decimalsOf(x.token), 4)} ${escapeHtml(
+              x.tokenSymbol ?? 'токен'
+            )}`;
+      callDetail = `<span class="xc-call" title="Декодовано з payload події шлюзу — аргументи методу на контракті призначення">${escapeHtml(
+        dc.method || dc.selector
+      )} · ${who} ${escapeHtml(shortAddr(dc.recipient, 8, 6))}${amt}</span>`;
+    }
 
-    const link = destExplorerUrl(x.exactNamespace ?? x.caip, x.recipient);
-    const destLink = link
-      ? `<a class="xc-dest" href="${link.url}" target="_blank" rel="noopener" title="Відкрити отримувача на ${escapeHtml(
-          link.label
-        )} — кінець мосту">кінець мосту: ${escapeHtml(link.label)} ↗</a>`
-      : '';
+    // Status, strongest evidence first:
+    //  • destination chain's own RPC confirmed arrival (Executed/Finalized) or a
+    //    bounce (Reverted/Rescued) — authoritative, by shared subTxId;
+    //  • the Push executeUniversalTx itself reverted → nothing was sent;
+    //  • the Push gateway rescued the funds back for THIS universal tx (id match);
+    //  • otherwise: sent from Push, destination not yet confirmed from its RPC.
+    const delivered = x.subTxId ? state?.delivery.get(x.subTxId.toLowerCase()) : undefined;
+    const st =
+      delivered && delivered.ok
+        ? { cls: 'st-delivered', text: `✓ доставлено на ${escapeHtml(delivered.chainLabel)}`, title: `Підтверджено з публічного RPC самого ${delivered.chainLabel}: його UniversalGateway/Vault емітив UniversalTxExecuted/Finalized із тим самим subTxId.` }
+        : delivered && !delivered.ok
+        ? { cls: 'st-fail', text: `✗ відхилено на ${escapeHtml(delivered.chainLabel)}`, title: `Підтверджено з RPC ${delivered.chainLabel}: на призначенні емітовано UniversalTxReverted/FundsRescued із тим самим subTxId — доставка не відбулась.` }
+        : !a.ok
+        ? { cls: 'st-fail', text: '✗ не виконано (Push)', title: 'executeUniversalTx завершився помилкою на Push — крос-чейн дію не відправлено.' }
+        : x.rescued
+        ? { cls: 'st-rescued', text: '↩ повернуто (rescue)', title: 'Шлюз Push емітив RescueFundsOnSourceChain для цього самого universalTxId (sha256 від tx-хеша цієї дії) і цього токена/чейна: кошти повернулись на Push, доставка не завершилась.' }
+        : { cls: 'st-sent', text: '↗ надіслано (Push)', title: 'Надіслано зі шлюзу Push. Доставку з RPC призначення поки не підтверджено (ще в дорозі, або публічний RPC того чейна недоступний / блокує CORS з браузера). Можна перевірити вручну за посиланням.' };
+
+    // The link: to the actual settling tx on the destination chain when we have
+    // it (the real end of the bridge), else to the recipient address there.
+    const addrLink = destExplorerUrl(x.exactNamespace ?? x.caip, x.recipient);
+    const destLink =
+      delivered && delivered.destTxUrl
+        ? `<a class="xc-dest" href="${delivered.destTxUrl}" target="_blank" rel="noopener" title="Транзакція доставки на ${escapeHtml(
+            delivered.chainLabel
+          )}">кінець мосту: ${escapeHtml(delivered.chainLabel)} tx ↗</a>`
+        : addrLink
+        ? `<a class="xc-dest" href="${addrLink.url}" target="_blank" rel="noopener" title="Відкрити отримувача на ${escapeHtml(
+            addrLink.label
+          )} — кінець мосту">кінець мосту: ${escapeHtml(addrLink.label)} ↗</a>`
+        : '';
 
     return `<div class="tx-xc-wrap">
       <a class="tx tx-xc" href="${donutTxUrl(a.txHash)}" target="_blank" rel="noopener" title="Шлюз → ${escapeHtml(
@@ -1226,6 +1398,7 @@ function renderCall(
       </a>
       <div class="xc-sub">
         <span class="st ${st.cls}" title="${escapeHtml(st.title)}">${st.text}</span>
+        ${callDetail}
         ${destLink}
       </div>
     </div>`;

@@ -331,8 +331,15 @@ button[type="submit"]:hover { filter: brightness(1.08); }
   border: 1px solid var(--line); white-space: nowrap;
 }
 .st-sent { color: var(--accent-2); background: rgba(139, 92, 246, 0.16); border-color: rgba(139, 92, 246, 0.4); }
+.st-delivered { color: var(--ok); background: rgba(55, 211, 153, 0.14); border-color: rgba(55, 211, 153, 0.45); }
 .st-rescued { color: var(--pending); background: rgba(240, 167, 66, 0.14); border-color: rgba(240, 167, 66, 0.4); }
 .st-fail { color: var(--err); background: rgba(255, 107, 122, 0.12); border-color: rgba(255, 107, 122, 0.4); }
+/* decoded destination-method call detail (selector + recipient + amount) */
+.xc-call {
+  font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace;
+  background: rgba(255, 255, 255, 0.04); border: 1px solid var(--line);
+  border-radius: 6px; padding: 2px 8px; white-space: nowrap;
+}
 /* link to the recipient on the destination chain's own explorer */
 .xc-dest { color: var(--accent); text-decoration: none; font-family: ui-monospace, monospace; }
 .xc-dest:hover { text-decoration: underline; }

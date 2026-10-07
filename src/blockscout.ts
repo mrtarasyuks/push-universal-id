@@ -204,6 +204,58 @@ export async function getLogs(opts: {
 }
 
 /**
+ * Read-only eth_getLogs against an arbitrary chain's public JSON-RPC (used for
+ * the destination chain when confirming cross-chain delivery). Unlike the Donut
+ * Blockscout proxy, a normal EVM node honours positional topic filters, so
+ * callers can pass `topics: [[sigA, sigB], subTxId]` and the node does the AND
+ * filter on the indexed subTxId for us. Returns the logs on success (possibly
+ * empty), or `null` on any failure (network / CORS / the node rejecting the
+ * query) so the caller can try the next RPC url or fall back to Push-side
+ * signals. Never signs or sends anything, no key.
+ */
+export async function rpcGetLogs(
+  rpcUrl: string,
+  params: {
+    address: string | string[];
+    topics: (string | string[] | null)[];
+    fromBlock?: string;
+    toBlock?: string;
+  }
+): Promise<RpcLog[] | null> {
+  let res: Response;
+  try {
+    res = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_getLogs',
+        params: [
+          {
+            address: params.address,
+            topics: params.topics,
+            fromBlock: params.fromBlock ?? 'earliest',
+            toBlock: params.toBlock ?? 'latest',
+          },
+        ],
+      }),
+    });
+  } catch {
+    return null;
+  }
+  if (!res.ok) return null;
+  let json: { result?: unknown; error?: unknown };
+  try {
+    json = (await res.json()) as { result?: unknown; error?: unknown };
+  } catch {
+    return null;
+  }
+  if (json.error || !Array.isArray(json.result)) return null;
+  return json.result as RpcLog[];
+}
+
+/**
  * Read-only eth_call through Blockscout's JSON-RPC proxy (CORS-enabled). Used
  * for the reverse lookup (factory.getOriginForUEA). Returns the raw hex result;
  * never signs or sends anything.

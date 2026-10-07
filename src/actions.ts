@@ -1,4 +1,12 @@
-import { decodeFunctionData, decodeAbiParameters, decodeEventLog, encodeEventTopics, getAddress } from 'viem';
+import {
+  decodeFunctionData,
+  decodeAbiParameters,
+  decodeEventLog,
+  encodeEventTopics,
+  getAddress,
+  sha256,
+  toBytes,
+} from 'viem';
 import bs58 from 'bs58';
 import type { Tx, RpcLog } from './blockscout';
 import { tokenMeta } from './known';
@@ -108,9 +116,15 @@ export interface CrossChain {
    * "eip155:421614"), used to build a destination-explorer link when the
    * authoritative event namespace is not available. */
   caip?: string | null;
-  /** 4-byte selector of the method this action calls on the destination
-   * contract, decoded from the outbound `payload`. '' for a plain transfer. */
-  destSelector?: string;
+  /** The method this action calls on the destination contract, decoded from the
+   * outbound `payload` — selector plus (for approve/transfer/transferFrom) the
+   * recipient and amount. null for a plain transfer (empty payload). */
+  destCall?: DestCall | null;
+  /** The gateway's unique id for this outbound sub-tx (UniversalTxOutbound
+   * `subTxId`, topic1). Set after the event is matched; used to confirm delivery
+   * on the destination chain (its UniversalTxExecuted/Finalized carry the same
+   * subTxId). */
+  subTxId?: string | null;
   /** Exact destination chain label, taken from the gateway's UniversalTxOutbound
    * event (authoritative). Set after the event logs are fetched; null until then
    * or when no matching event exists, in which case the UI falls back to `chain`
@@ -225,7 +239,7 @@ function decodeOutbound(data: string): CrossChain | null {
       recipient: decodeRecipient(req.recipient),
       hasPayload,
       caip: meta?.caip ?? null,
-      destSelector: hasPayload ? selOf(req.payload) : '',
+      destCall: hasPayload ? decodeDestPayload(req.payload) : null,
     };
   } catch {
     return null;
@@ -273,6 +287,67 @@ const KNOWN_SELECTORS: Record<string, string> = {
 export function selectorLabel(selector: string): string | null {
   if (!selector) return null;
   return KNOWN_SELECTORS[selector.toLowerCase()] ?? null;
+}
+
+/** What the cross-chain action calls on the destination contract: the 4-byte
+ * selector, a human method name when known, and — for the standard ERC-20
+ * methods whose shape is unambiguous — the decoded recipient and amount. */
+export interface DestCall {
+  selector: string;
+  method: string | null;
+  /** The address the method acts on (transfer → `to`, approve → `spender`,
+   * transferFrom → `to`), or null when the method is not one we decode. */
+  recipient: string | null;
+  /** The token amount argument, or null. Raw units of the destination token. */
+  amount: bigint | null;
+}
+
+/** Decode the method a cross-chain action invokes on the destination contract
+ * from the outbound `payload`: always the selector, plus recipient + amount for
+ * the standard ERC-20 calls (transfer / approve / transferFrom) whose argument
+ * layout is fixed. Returns null for an empty payload; never guesses arguments
+ * for a method whose layout we do not know. */
+export function decodeDestPayload(payload: string | undefined | null): DestCall | null {
+  if (!payload || payload.length <= 2) return null;
+  const selector = selOf(payload);
+  if (!selector) return null;
+  const method = KNOWN_SELECTORS[selector] ?? null;
+  const body = ('0x' + payload.slice(10)) as `0x${string}`;
+  try {
+    if (selector === '0xa9059cbb' || selector === '0x095ea7b3') {
+      // transfer(address,uint256) / approve(address,uint256)
+      const [addr, amt] = decodeAbiParameters(
+        [{ type: 'address' }, { type: 'uint256' }],
+        body
+      );
+      return { selector, method, recipient: safeAddr(addr as string), amount: amt as bigint };
+    }
+    if (selector === '0x23b872dd') {
+      // transferFrom(address from,address to,uint256)
+      const [, to, amt] = decodeAbiParameters(
+        [{ type: 'address' }, { type: 'address' }, { type: 'uint256' }],
+        body
+      );
+      return { selector, method, recipient: safeAddr(to as string), amount: amt as bigint };
+    }
+  } catch {
+    // Fall through — keep the selector, drop the (undecodable) arguments.
+  }
+  return { selector, method, recipient: null, amount: null };
+}
+
+// ---- Deterministic Push-Chain universalTxId ----
+// Push Chain keys every universal tx initiated on it by
+//   universalTxId = sha256("<pushChainCaip>:<pushTxHash>")
+// (push-chain/x/uexecutor/types/keys.go GetPcUniversalTxKey, mirrored by
+// @pushchain/core's derivePcUniversalTxId). The gateway's RescueFundsOnSourceChain
+// indexes this exact id, so computing it from an action's own tx hash lets us bind
+// a rescue to the specific universal tx that failed — not merely its direction.
+const PUSH_DONUT_CAIP = 'eip155:42101';
+
+export function pcUniversalTxId(pushTxHash: string): string {
+  const h = pushTxHash.startsWith('0x') ? pushTxHash : `0x${pushTxHash}`;
+  return sha256(toBytes(`${PUSH_DONUT_CAIP}:${h.toLowerCase()}`));
 }
 
 // ---- Cross-chain destination from the gateway's own event ----
@@ -329,9 +404,10 @@ export interface OutboundEvent {
   recipient: string | null;
   /** The gateway's unique id for this outbound (indexed topic). */
   subTxId: string;
-  /** 4-byte selector of the method invoked on the destination contract, decoded
-   * from the event's `payload`. '' when the payload is empty (a plain transfer). */
-  destSelector: string;
+  /** The method invoked on the destination contract, decoded from the event's
+   * `payload`: selector plus recipient/amount for the standard ERC-20 calls.
+   * null when the payload is empty (a plain transfer). */
+  destCall: DestCall | null;
 }
 
 /** Decode a raw UniversalTxOutbound log, or null if it is not one / malformed. */
@@ -361,7 +437,7 @@ export function decodeOutboundEvent(log: RpcLog): OutboundEvent | null {
       amount: typeof a.amount === 'bigint' ? a.amount : BigInt(a.amount ?? 0),
       recipient: decodeRecipient(a.recipient),
       subTxId: a.subTxId ?? '',
-      destSelector: a.payload && a.payload.length > 2 ? selOf(a.payload) : '',
+      destCall: a.payload && a.payload.length > 2 ? decodeDestPayload(a.payload) : null,
     };
   } catch {
     return null;
@@ -397,6 +473,139 @@ export const RESCUE_EVENT_TOPIC0 = encodeEventTopics({
   eventName: 'RescueFundsOnSourceChain',
 })[0] as string;
 
+// ---- Delivery confirmation on the destination chain ----
+// The Push side only tells us the outbound was *sent*. The authoritative "it
+// arrived" lives on the destination chain, where the UniversalGateway/Vault emit
+// an event once the TSS executes the inbound leg. Every one of those events
+// carries the SAME `subTxId` (topic1) as the Push-side UniversalTxOutbound, so we
+// can confirm a specific action by querying the destination chain's own public
+// RPC for a log with that subTxId — no indexer, no key. ABIs copied verbatim from
+// @pushchain/core's universal-tx-detector (events.js), sourced there from
+// push-chain-gateway-contracts / push-chain-core-contracts.
+const REVERT_INSTRUCTIONS = {
+  name: 'revertInstruction',
+  type: 'tuple',
+  components: [
+    { name: 'revertRecipient', type: 'address' },
+    { name: 'revertMsg', type: 'bytes' },
+  ],
+} as const;
+
+const DEST_EVENT_ABI = [
+  {
+    type: 'event',
+    name: 'UniversalTxExecuted',
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'subTxId', type: 'bytes32' },
+      { indexed: true, name: 'universalTxId', type: 'bytes32' },
+      { indexed: true, name: 'pushAccount', type: 'address' },
+      { indexed: false, name: 'target', type: 'address' },
+      { indexed: false, name: 'token', type: 'address' },
+      { indexed: false, name: 'amount', type: 'uint256' },
+      { indexed: false, name: 'data', type: 'bytes' },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'UniversalTxFinalized',
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'subTxId', type: 'bytes32' },
+      { indexed: true, name: 'universalTxId', type: 'bytes32' },
+      { indexed: true, name: 'pushAccount', type: 'address' },
+      { indexed: false, name: 'recipient', type: 'address' },
+      { indexed: false, name: 'token', type: 'address' },
+      { indexed: false, name: 'amount', type: 'uint256' },
+      { indexed: false, name: 'data', type: 'bytes' },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'UniversalTxReverted',
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'subTxId', type: 'bytes32' },
+      { indexed: true, name: 'universalTxId', type: 'bytes32' },
+      { indexed: true, name: 'token', type: 'address' },
+      { indexed: false, name: 'amount', type: 'uint256' },
+      REVERT_INSTRUCTIONS,
+    ],
+  },
+  {
+    type: 'event',
+    name: 'RevertUniversalTx',
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'subTxId', type: 'bytes32' },
+      { indexed: true, name: 'universalTxId', type: 'bytes32' },
+      { indexed: true, name: 'to', type: 'address' },
+      { indexed: false, name: 'token', type: 'address' },
+      { indexed: false, name: 'amount', type: 'uint256' },
+      REVERT_INSTRUCTIONS,
+    ],
+  },
+  {
+    type: 'event',
+    name: 'FundsRescued',
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'subTxId', type: 'bytes32' },
+      { indexed: true, name: 'universalTxId', type: 'bytes32' },
+      { indexed: true, name: 'token', type: 'address' },
+      { indexed: false, name: 'amount', type: 'uint256' },
+      REVERT_INSTRUCTIONS,
+    ],
+  },
+] as const;
+
+const DEST_SUCCESS_EVENTS = new Set(['UniversalTxExecuted', 'UniversalTxFinalized']);
+
+function topic0(name: 'UniversalTxExecuted' | 'UniversalTxFinalized' | 'UniversalTxReverted' | 'RevertUniversalTx' | 'FundsRescued'): string {
+  return encodeEventTopics({ abi: DEST_EVENT_ABI, eventName: name })[0] as string;
+}
+
+/** topic0 of every destination-chain event that proves a sub-tx's fate — handed
+ * as a topics[0] OR-set to eth_getLogs so one query covers success and failure. */
+export const DEST_EVENT_TOPICS: string[] = [
+  topic0('UniversalTxExecuted'),
+  topic0('UniversalTxFinalized'),
+  topic0('UniversalTxReverted'),
+  topic0('RevertUniversalTx'),
+  topic0('FundsRescued'),
+];
+
+/** The destination-chain fate of one outbound sub-tx. */
+export interface DeliveryLog {
+  subTxId: string;
+  /** true for Executed/Finalized (arrived), false for Reverted/Rescued (bounced). */
+  ok: boolean;
+  eventName: string;
+  /** The transaction hash ON THE DESTINATION CHAIN that settled it. */
+  destTxHash: string;
+}
+
+/** Decode a destination-chain settlement log, or null if it is not one. */
+export function decodeDeliveryLog(log: RpcLog): DeliveryLog | null {
+  try {
+    const d = decodeEventLog({
+      abi: DEST_EVENT_ABI,
+      data: log.data as `0x${string}`,
+      topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
+    });
+    const subTxId = (d.args as { subTxId?: string }).subTxId;
+    if (!subTxId) return null;
+    return {
+      subTxId: subTxId.toLowerCase(),
+      ok: DEST_SUCCESS_EVENTS.has(d.eventName),
+      eventName: d.eventName,
+      destTxHash: log.transactionHash,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** A decoded RescueFundsOnSourceChain: funds for a failed cross-chain tx that the
  * gateway returned to `sender` (the UEA) on Push. */
 export interface RescueEvent {
@@ -406,6 +615,10 @@ export interface RescueEvent {
   sender: string;
   token: string;
   chainNamespace: string;
+  /** The universal tx this rescue belongs to (indexed topic1). Equals
+   * pcUniversalTxId(originalOutboundTxHash), which lets us bind the rescue to the
+   * exact action that failed rather than to a whole direction. */
+  universalTxId: string;
 }
 
 /** Decode a raw RescueFundsOnSourceChain log, or null if not one / malformed. */
@@ -420,6 +633,7 @@ export function decodeRescueEvent(log: RpcLog): RescueEvent | null {
       sender: string;
       prc20: string;
       chainNamespace: string;
+      universalTxId: string;
     };
     return {
       txHash: log.transactionHash,
@@ -428,6 +642,7 @@ export function decodeRescueEvent(log: RpcLog): RescueEvent | null {
       sender: safeAddr(a.sender),
       token: safeAddr(a.prc20),
       chainNamespace: a.chainNamespace ?? '',
+      universalTxId: (a.universalTxId ?? '').toLowerCase(),
     };
   } catch {
     return null;
