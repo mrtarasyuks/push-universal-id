@@ -150,6 +150,59 @@ export async function getTokenBalances(address: string): Promise<TokenBalance[]>
   return Array.isArray(data) ? data : [];
 }
 
+/** A raw log as returned by eth_getLogs. */
+export interface RpcLog {
+  address: string;
+  topics: string[];
+  data: string;
+  transactionHash: string;
+  logIndex: string; // hex
+  blockNumber: string; // hex
+}
+
+/**
+ * Read-only eth_getLogs through the Blockscout JSON-RPC proxy (CORS-enabled).
+ * We pass only topic0 (the event signature): this node does not honour
+ * positional `null` placeholders in the topics array, so callers filter the
+ * remaining indexed fields client-side. Never throws — returns [] on any error
+ * (including the HTML the proxy emits when a block range is too wide), so a
+ * failed enrichment degrades to the token-derived fallback instead of breaking
+ * the page. Never signs or sends anything.
+ */
+export async function getLogs(opts: {
+  address: string;
+  topic0: string;
+  fromBlock: string;
+  toBlock: string;
+}): Promise<RpcLog[]> {
+  let res: Response;
+  try {
+    res = await fetch(DONUT.ethRpc, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'eth_getLogs',
+        params: [
+          { address: opts.address, topics: [opts.topic0], fromBlock: opts.fromBlock, toBlock: opts.toBlock },
+        ],
+      }),
+    });
+  } catch {
+    return [];
+  }
+  if (!res.ok) return [];
+  let json: { result?: unknown; error?: unknown };
+  try {
+    json = (await res.json()) as { result?: unknown; error?: unknown };
+  } catch {
+    return []; // the proxy returns HTML (not JSON) when a query is too heavy
+  }
+  if (json.error || !Array.isArray(json.result)) return [];
+  return json.result as RpcLog[];
+}
+
 /**
  * Read-only eth_call through Blockscout's JSON-RPC proxy (CORS-enabled). Used
  * for the reverse lookup (factory.getOriginForUEA). Returns the raw hex result;

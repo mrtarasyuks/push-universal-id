@@ -2,6 +2,7 @@ import {
   ORIGIN_CHAINS,
   findChain,
   findChainByCaip,
+  chainLabelFromNamespace,
   REVERSE_ID,
   DONUT,
   donutAddressUrl,
@@ -14,14 +15,23 @@ import {
   getTransactions,
   getTokenTransfers,
   getTokenBalances,
+  getLogs,
   isNotFound,
   type Tx,
   type TokenTransfer,
   type TokenBalance,
   type PageParams,
 } from './blockscout';
-import { decodeUniversalAction, selectorLabel, type UniversalAction, type InnerCall } from './actions';
-import { knownAddr, isInfra, tokenMeta } from './known';
+import {
+  decodeUniversalAction,
+  decodeOutboundEvent,
+  selectorLabel,
+  OUTBOUND_EVENT_TOPIC0,
+  type UniversalAction,
+  type InnerCall,
+  type OutboundEvent,
+} from './actions';
+import { knownAddr, isInfra, tokenMeta, GATEWAY_PC_ADDRESS } from './known';
 import { shortAddr, formatUnits, formatInt, sumGasWei, timeAgo, nowUtc } from './format';
 import { getAddress } from 'viem';
 import './style.css';
@@ -173,6 +183,11 @@ interface LookupState {
   tokNext: PageParams;
   names: Map<string, NameInfo>;
   relayers: Set<string>;
+  // Cross-chain outbound events (UniversalTxOutbound) per tx hash, giving the
+  // exact destination chain; `outboundFetched` tracks which tx hashes we have
+  // already looked up so pagination does not re-query them.
+  outbound: Map<string, OutboundEvent[]>;
+  outboundFetched: Set<string>;
   warnings: string[];
   loadingMore: boolean;
   // Background auto-pagination (so gas / top apps cover the whole history).
@@ -333,6 +348,8 @@ async function run() {
     tokNext,
     names: new Map(),
     relayers: new Set(),
+    outbound: new Map(),
+    outboundFetched: new Set(),
     warnings,
     loadingMore: false,
     autoLoading: false,
@@ -347,6 +364,11 @@ async function run() {
   // Confirm the offchain-derived UEA against the factory's own computeUEA, in
   // the background — the chain validating our CREATE2 math for the reviewer.
   if (verifyChain) void verifyUea(verifyChain, originAddress, uea);
+
+  // Resolve the exact destination chain of each cross-chain action from the
+  // gateway's own UniversalTxOutbound events, in the background (the page first
+  // shows the token-derived chain, then upgrades it to the authoritative one).
+  void refreshOutbound();
 
   // Fetch the rest of the history in the background so gas and the top-apps
   // summary reflect the whole account, not just the first ~50 items.
@@ -422,6 +444,111 @@ function nameOf(addr: string): NameInfo {
   return state?.names.get(addr.toLowerCase()) ?? { name: null, isContract: false };
 }
 
+// ---- Exact cross-chain destination from gateway events ----
+// Block window per eth_getLogs query (the proxy handles ~100k blocks / up to its
+// result cap; we stay well under) and a cap on windows so a UEA whose history
+// spans a very wide range cannot fan out into unbounded calls.
+const OUTBOUND_WINDOW = 40000;
+const OUTBOUND_WINDOW_CAP = 20;
+const toHexBlock = (n: number) => `0x${n.toString(16)}`;
+
+// Serialize resolution: concurrent callers (initial lookup + background
+// pagination) queue behind one another, and each pass only fetches tx hashes not
+// already covered (outboundFetched), so nothing is queried twice.
+let outboundQueue: Promise<void> = Promise.resolve();
+
+function resolveOutboundChains(): Promise<void> {
+  outboundQueue = outboundQueue.then(doResolveOutbound).catch(() => {});
+  return outboundQueue;
+}
+
+/** Re-render after resolving (used for the background initial pass). */
+async function refreshOutbound(): Promise<void> {
+  await resolveOutboundChains();
+  render();
+}
+
+async function doResolveOutbound(): Promise<void> {
+  const m = state;
+  if (!m) return;
+  const ueaLc = m.uea.toLowerCase();
+
+  // Which loaded txs carry a cross-chain action and have not been looked up yet?
+  const pending: { hash: string; block: number }[] = [];
+  for (const tx of m.txs) {
+    const hl = tx.hash.toLowerCase();
+    if (m.outboundFetched.has(hl)) continue;
+    const a = decodeUniversalAction(tx);
+    const hasXc = a?.calls.some((c) => c.crossChain) ?? false;
+    if (hasXc && tx.block_number != null) {
+      pending.push({ hash: hl, block: tx.block_number });
+    } else {
+      // Not cross-chain (or no block height) — mark done so we never rescan it.
+      m.outboundFetched.add(hl);
+    }
+  }
+  if (!pending.length) return;
+
+  const minB = Math.min(...pending.map((p) => p.block));
+  const maxB = Math.max(...pending.map((p) => p.block));
+  const wanted = new Set(pending.map((p) => p.hash));
+
+  // Fetch the gateway's outbound events over the span the cross-chain txs cover,
+  // in bounded windows, and filter to this UEA client-side (the node ignores
+  // positional topic filters). Match each event back to its tx by hash.
+  let from = minB;
+  let windows = 0;
+  while (from <= maxB && windows < OUTBOUND_WINDOW_CAP) {
+    const to = Math.min(from + OUTBOUND_WINDOW, maxB);
+    const logs = await getLogs({
+      address: GATEWAY_PC_ADDRESS,
+      topic0: OUTBOUND_EVENT_TOPIC0,
+      fromBlock: toHexBlock(from),
+      toBlock: toHexBlock(to),
+    });
+    if (state !== m) return; // a newer lookup replaced us — drop stale work
+    for (const lg of logs) {
+      const ev = decodeOutboundEvent(lg);
+      if (!ev || ev.sender.toLowerCase() !== ueaLc) continue;
+      const hl = ev.txHash.toLowerCase();
+      if (!wanted.has(hl)) continue;
+      const arr = m.outbound.get(hl) ?? [];
+      if (!arr.some((e) => e.logIndex === ev.logIndex)) {
+        arr.push(ev);
+        arr.sort((a, b) => a.logIndex - b.logIndex);
+        m.outbound.set(hl, arr);
+      }
+    }
+    from = to + 1;
+    windows += 1;
+  }
+
+  // Mark every pending tx as looked up (even those with no event found, e.g. a
+  // reverted outbound) so pagination does not re-query them.
+  for (const p of pending) m.outboundFetched.add(p.hash);
+}
+
+/** Stamp each cross-chain inner call with its exact destination chain from the
+ * fetched outbound events. Within a tx, events are matched to calls by token
+ * first, then in log order — so several bridges in one tx map correctly. */
+function attachExactChains(actions: UniversalAction[]): void {
+  if (!state) return;
+  for (const a of actions) {
+    const events = state.outbound.get(a.txHash.toLowerCase());
+    if (!events || !events.length) continue;
+    const used = new Array<boolean>(events.length).fill(false);
+    for (const c of a.calls) {
+      if (!c.crossChain) continue;
+      const tok = c.crossChain.token.toLowerCase();
+      let idx = events.findIndex((e, i) => !used[i] && e.token.toLowerCase() === tok);
+      if (idx < 0) idx = used.findIndex((u) => !u);
+      if (idx < 0) break;
+      used[idx] = true;
+      c.crossChain.exactChain = chainLabelFromNamespace(events[idx].chainNamespace);
+    }
+  }
+}
+
 // ---- Pagination ----
 /** Fetch the next page of txs and token-transfers (whichever still has one). */
 async function fetchNextPage(): Promise<void> {
@@ -463,6 +590,7 @@ async function autoLoad() {
       await fetchNextPage();
       state.autoPages += 1;
       await resolveNames();
+      await resolveOutboundChains();
       render();
     }
   } finally {
@@ -482,6 +610,7 @@ async function loadMore() {
   try {
     await fetchNextPage();
     await resolveNames();
+    await resolveOutboundChains();
   } finally {
     state.loadingMore = false;
     render();
@@ -500,6 +629,10 @@ function render() {
     const a = decodeUniversalAction(tx);
     if (a) actions.push(a);
   }
+  // Upgrade each cross-chain action's destination from the token-derived guess to
+  // the exact chain carried by the gateway's UniversalTxOutbound event, when we
+  // have fetched it.
+  attachExactChains(actions);
 
   // Learn each PRC-20's real decimals from token-transfer rows (Blockscout).
   for (const tt of m.tokenTransfers) {
@@ -547,8 +680,9 @@ function render() {
   for (const a of actions) {
     for (const c of a.calls) {
       if (c.crossChain) {
-        // Group by destination chain (the real "where did it go").
-        const chain = c.crossChain.chain ?? 'інший чейн';
+        // Group by destination chain (the real "where did it go") — the exact
+        // chain from the gateway event when known, else the token-derived guess.
+        const chain = c.crossChain.exactChain ?? c.crossChain.chain ?? 'інший чейн';
         const app = ensure(`xc:${chain}`, {
           label: `→ ${chain}`,
           chain,
@@ -688,7 +822,7 @@ function render() {
   const appsHtml = appList.length
     ? `<section class="block">
         <h3>Топ-застосунки UEA <span class="count-badge">${appList.length}</span></h3>
-        <p class="hint">Згруповано за застосунком: скільки дій і скільки PC припало на кожен. Крос-чейн дії зведені за чейном призначення.</p>
+        <p class="hint">Згруповано за застосунком: скільки дій і скільки PC припало на кожен. Крос-чейн дії зведені за точним чейном призначення (з події шлюзу UniversalTxOutbound).</p>
         <ul class="apps">
           ${appList
             .slice(0, 30)
@@ -933,7 +1067,7 @@ function render() {
       ${warningsHtml}
       <p class="source">Origin↔UEA — фабрика Push (${escapeHtml(
         DONUT.explorer
-      )}) та offchain CREATE2 (@pushchain/core) · активність і декодування з Blockscout · ${nowUtc()}</p>
+      )}) та offchain CREATE2 (@pushchain/core) · активність і декодування з Blockscout · крос-чейн напрямок — події UniversalTxOutbound через eth_getLogs · ${nowUtc()}</p>
     </div>`;
 
   const more = document.getElementById('load-more');
@@ -976,9 +1110,16 @@ function renderCall(
   // Cross-chain (gateway outbound): show where it actually went, not the gateway.
   if (c.crossChain) {
     const x = c.crossChain;
-    const chain = x.chain ?? 'інший чейн';
+    // Prefer the exact chain from the UniversalTxOutbound event; fall back to the
+    // token-derived guess. A ✓ marks a destination confirmed from the event.
+    const exact = !!x.exactChain;
+    const chain = x.exactChain ?? x.chain ?? 'інший чейн';
+    const mark = exact ? '<span class="xc-exact" aria-hidden="true">✓</span>' : '';
     const dest = x.recipient ? ` · ${escapeHtml(shortAddr(x.recipient, 8, 6))}` : '';
     const kind = x.hasPayload ? 'крос-чейн виклик' : 'крос-чейн переказ';
+    const chainTitle = exact
+      ? `точний чейн призначення з події шлюзу UniversalTxOutbound`
+      : `чейн виведено з бриджевого токена (подію шлюзу не знайдено)`;
     const bridged =
       x.amount > 0n
         ? `${formatUnits(x.amount.toString(), decimalsOf(x.token), 4)} ${escapeHtml(
@@ -989,10 +1130,10 @@ function renderCall(
         : '';
     return `<a class="tx tx-xc" href="${donutTxUrl(a.txHash)}" target="_blank" rel="noopener" title="Шлюз → ${escapeHtml(
       chain
-    )}${x.recipient ? ` · отримувач ${escapeHtml(x.recipient)}` : ''}">
+    )} — ${chainTitle}${x.recipient ? ` · отримувач ${escapeHtml(x.recipient)}` : ''}">
       <span class="tx-dir xc">⇄ CC</span>
       <span class="tx-method">${kind}${tag}</span>
-      <span class="tx-counter">→ ${escapeHtml(chain)}${dest}</span>
+      <span class="tx-counter">→ ${escapeHtml(chain)}${mark}${dest}</span>
       <span class="tx-val">${bridged}</span>
       <span class="tx-time">${status}${time}</span>
     </a>`;

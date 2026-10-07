@@ -248,6 +248,8 @@ button[type="submit"]:hover { filter: brightness(1.08); }
 .tx-dir.xc { background: rgba(139, 92, 246, 0.22); color: var(--accent-2); }
 .tx-xc { border-color: rgba(139, 92, 246, 0.4); }
 .tx-xc .tx-counter { color: var(--accent-2); }
+/* ✓ next to a cross-chain destination = confirmed from the gateway event */
+.xc-exact { color: var(--ok, #39d98a); font-weight: 700; margin-left: 4px; }
 
 /* top-apps summary */
 .apps { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }

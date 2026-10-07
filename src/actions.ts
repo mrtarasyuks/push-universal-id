@@ -1,6 +1,6 @@
-import { decodeFunctionData, decodeAbiParameters, getAddress } from 'viem';
+import { decodeFunctionData, decodeAbiParameters, decodeEventLog, encodeEventTopics, getAddress } from 'viem';
 import bs58 from 'bs58';
-import type { Tx } from './blockscout';
+import type { Tx, RpcLog } from './blockscout';
 import { tokenMeta } from './known';
 
 // Decodes what a UEA actually did on Push Chain. The relayer submits a tx that
@@ -104,6 +104,11 @@ export interface CrossChain {
   /** true when `payload` is non-empty — a cross-chain contract call, not a
    * plain funds transfer. */
   hasPayload: boolean;
+  /** Exact destination chain label, taken from the gateway's UniversalTxOutbound
+   * event (authoritative). Set after the event logs are fetched; null until then
+   * or when no matching event exists, in which case the UI falls back to `chain`
+   * (derived from the bridged token). */
+  exactChain?: string | null;
 }
 
 export interface InnerCall {
@@ -250,4 +255,88 @@ const KNOWN_SELECTORS: Record<string, string> = {
 export function selectorLabel(selector: string): string | null {
   if (!selector) return null;
   return KNOWN_SELECTORS[selector.toLowerCase()] ?? null;
+}
+
+// ---- Cross-chain destination from the gateway's own event ----
+// The outbound calldata (decodeOutbound above) only names the bridged token, so
+// the chain had to be *inferred* from it. The UniversalGatewayPC emits a
+// `UniversalTxOutbound` event that carries the exact destination `chainNamespace`
+// (a CAIP-2 string, e.g. "eip155:421614"). Reading that log via eth_getLogs gives
+// the authoritative destination chain instead of a token-based guess. ABI copied
+// verbatim from @pushchain/core (constants/abi/universalGatewayPC.evm).
+
+const OUTBOUND_EVENT_ABI = [
+  {
+    type: 'event',
+    name: 'UniversalTxOutbound',
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'subTxId', type: 'bytes32' },
+      { indexed: true, name: 'sender', type: 'address' },
+      { indexed: false, name: 'chainNamespace', type: 'string' },
+      { indexed: true, name: 'token', type: 'address' },
+      { indexed: false, name: 'recipient', type: 'bytes' },
+      { indexed: false, name: 'amount', type: 'uint256' },
+      { indexed: false, name: 'gasToken', type: 'address' },
+      { indexed: false, name: 'gasFee', type: 'uint256' },
+      { indexed: false, name: 'gasLimit', type: 'uint256' },
+      { indexed: false, name: 'payload', type: 'bytes' },
+      { indexed: false, name: 'protocolFee', type: 'uint256' },
+      { indexed: false, name: 'revertRecipient', type: 'address' },
+      { indexed: false, name: 'txType', type: 'uint8' },
+      { indexed: false, name: 'gasPrice', type: 'uint256' },
+    ],
+  },
+] as const;
+
+/** keccak256 topic0 of UniversalTxOutbound — the only topic this node filters on
+ * reliably (positional null placeholders are ignored), so callers match sender /
+ * token client-side. */
+export const OUTBOUND_EVENT_TOPIC0 = encodeEventTopics({
+  abi: OUTBOUND_EVENT_ABI,
+  eventName: 'UniversalTxOutbound',
+})[0] as string;
+
+/** A decoded cross-chain outbound event: the exact destination chain plus the
+ * token/amount, keyed back to its transaction so it can enrich an InnerCall. */
+export interface OutboundEvent {
+  txHash: string;
+  logIndex: number;
+  /** The UEA that sent the outbound (event `sender`). */
+  sender: string;
+  /** Exact destination chain as CAIP-2, e.g. "eip155:421614". */
+  chainNamespace: string;
+  token: string;
+  amount: bigint;
+  recipient: string | null;
+}
+
+/** Decode a raw UniversalTxOutbound log, or null if it is not one / malformed. */
+export function decodeOutboundEvent(log: RpcLog): OutboundEvent | null {
+  try {
+    const d = decodeEventLog({
+      abi: OUTBOUND_EVENT_ABI,
+      data: log.data as `0x${string}`,
+      topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
+    });
+    const a = d.args as unknown as {
+      sender: string;
+      chainNamespace: string;
+      token: string;
+      amount: bigint;
+      recipient: string;
+    };
+    if (!a.chainNamespace) return null;
+    return {
+      txHash: log.transactionHash,
+      logIndex: Number.parseInt(log.logIndex, 16),
+      sender: safeAddr(a.sender),
+      chainNamespace: a.chainNamespace,
+      token: safeAddr(a.token),
+      amount: typeof a.amount === 'bigint' ? a.amount : BigInt(a.amount ?? 0),
+      recipient: decodeRecipient(a.recipient),
+    };
+  } catch {
+    return null;
+  }
 }

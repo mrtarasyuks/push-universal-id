@@ -18,8 +18,10 @@ It also works **in reverse**: paste a UEA address that is already on Push Chain 
 you which origin wallet and chain it belongs to (asked straight from the Push factory), and it
 **decodes each `executeUniversalTx`** to show the real target application of every universal
 action — not just the relayer and token contracts a plain explorer stops at. For cross-chain
-actions it decodes the gateway call (`sendUniversalTxOutbound`) to show **which chain and which
-contract** the universal call was routed to. Actions are **grouped per app**, so you see at a
+actions it reads the gateway's own **`UniversalTxOutbound` event** (via `eth_getLogs`) to show
+the **exact destination chain** the universal call was routed to (and the recipient contract on
+it), rather than inferring the chain from the bridged token. A ✓ next to a destination means it
+was confirmed from that event. Actions are **grouped per app**, so you see at a
 glance the wallet's main integrations (how many calls and how much PC each), and the full
 history is **auto-loaded in the background** so gas and the top-apps totals cover everything,
 not just the first page.
@@ -94,11 +96,18 @@ tool shows.
 - **Universal action targets** — decoded in-browser with `viem` from each transaction's
   `raw_input` (the `executeUniversalTx` payload, and the `(address,uint256,bytes)[]` of a UEA
   multicall). When an inner call targets the gateway precompile, its `sendUniversalTxOutbound`
-  argument is decoded too: the bridged PRC-20 `token` identifies the **destination chain** (via
-  the SDK's synthetic-token map) and `recipient` the **destination contract** (EVM address or
-  Solana pubkey). Contract names come from the SDK's own address book (gateway, UniswapV3,
-  synthetic tokens, factory) first, then Blockscout. When an inner call cannot be decoded
-  cleanly it is shown as an undecoded action rather than guessed.
+  argument is decoded too: `recipient` gives the **destination contract** (EVM address or
+  Solana pubkey) and the bridged PRC-20 `token` the amount. Contract names come from the SDK's
+  own address book (gateway, UniswapV3, synthetic tokens, factory) first, then Blockscout. When
+  an inner call cannot be decoded cleanly it is shown as an undecoded action rather than guessed.
+- **Exact cross-chain destination** — the gateway's `UniversalTxOutbound` event carries the
+  destination chain as a CAIP-2 `chainNamespace` (e.g. `eip155:421614`). The tool reads these
+  events with `eth_getLogs` through the Blockscout RPC proxy (filtered by the event signature;
+  the proxy ignores positional topic filters, so the UEA `sender` and `token` are matched
+  client-side) and uses that **exact chain** instead of inferring it from the bridged token — so
+  a generic gas token, or the same token bridged to different chains, is resolved correctly. A ✓
+  marks a destination confirmed from the event; without a matching event the tool falls back to
+  the token-derived chain and says so.
 
 Every result footer shows the data source and the time it was read. When a source fails,
 the tool says so instead of showing made-up numbers.

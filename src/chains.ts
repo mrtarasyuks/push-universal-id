@@ -91,6 +91,17 @@ export function findChainByCaip(namespace: string, chainId: string): OriginChain
   });
 }
 
+/** Turn a CAIP-2 chain namespace (e.g. "eip155:421614") into a readable label.
+ * Uses our known origin-chain labels when the chain is one we list; otherwise
+ * returns the raw CAIP string (honest — never guessed). */
+export function chainLabelFromNamespace(ns: string): string {
+  const i = ns.lastIndexOf(':');
+  if (i < 0) return ns;
+  const namespace = ns.slice(0, i);
+  const chainId = ns.slice(i + 1);
+  return findChainByCaip(namespace, chainId)?.label ?? ns;
+}
+
 // ---- Donut testnet facts (from the SDK's own constants) ----
 export const DONUT = {
   chainId: 42101,
