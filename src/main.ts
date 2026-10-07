@@ -1267,17 +1267,19 @@ function render() {
     : '';
 
   // ---- relayer note ----
+  // folded: an active account can have hundreds of relayers — a wall of addresses buried the rest of the page
   const relayerHtml = m.relayers.size
-    ? `<p class="hint">Транзакції подавав ${
-        m.relayers.size === 1 ? 'релеєр' : 'релеєри'
-      } (інфраструктура Push, не застосунок): ${[...m.relayers]
-        .map(
-          (r) =>
-            `<a href="${donutAddressUrl(r)}" target="_blank" rel="noopener">${escapeHtml(
-              shortAddr(r, 6, 4)
-            )}</a>`
-        )
-        .join(', ')} — вони ж сплачують газ за UEA.</p>`
+    ? `<details class="hint relayers">
+        <summary>Транзакції подавали релеєри Push (${m.relayers.size}) — інфраструктура мережі, вони ж сплачують газ за UEA. Показати адреси</summary>
+        <p>${[...m.relayers]
+          .map(
+            (r) =>
+              `<a href="${donutAddressUrl(r)}" target="_blank" rel="noopener">${escapeHtml(
+                shortAddr(r, 6, 4)
+              )}</a>`
+          )
+          .join(', ')}</p>
+      </details>`
     : '';
 
   // ---- tokens ----

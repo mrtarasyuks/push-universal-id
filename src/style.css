@@ -525,3 +525,11 @@ button[type="submit"]:disabled,
   .row #chain,
   .row button[type="submit"] { flex: 0 0 auto; width: 100%; }
 }
+
+/* relayers: folded by default — an active account has hundreds of them */
+details.relayers summary { cursor: pointer; list-style: none; color: var(--muted); }
+details.relayers summary::-webkit-details-marker { display: none; }
+details.relayers summary::before { content: "▸ "; color: var(--accent-2); transition: transform .15s; display: inline-block; }
+details.relayers[open] summary::before { transform: rotate(90deg); }
+details.relayers summary:hover { color: var(--accent-2); }
+details.relayers p { margin: 8px 0 0; max-height: 180px; overflow: auto; line-height: 1.7; word-break: break-word; }

@@ -285,7 +285,10 @@ function mineLoop(data, wasm, mem, postMessage) {
                 <span class="app-nums">${L.join(" · ")}</span>
               </li>`}).join("")}
         </ul>
-      </section>`:"",S=e.relayers.size?`<p class="hint">Транзакції подавав ${e.relayers.size===1?"релеєр":"релеєри"} (інфраструктура Push, не застосунок): ${[...e.relayers].map(U=>`<a href="${nA(U)}" target="_blank" rel="noopener">${pe(Ar(U,6,4))}</a>`).join(", ")} — вони ж сплачують газ за UEA.</p>`:"",z=e.tokenTransfers.length?`<section class="block">
+      </section>`:"",S=e.relayers.size?`<details class="hint relayers">
+        <summary>Транзакції подавали релеєри Push (${e.relayers.size}) — інфраструктура мережі, вони ж сплачують газ за UEA. Показати адреси</summary>
+        <p>${[...e.relayers].map(U=>`<a href="${nA(U)}" target="_blank" rel="noopener">${pe(Ar(U,6,4))}</a>`).join(", ")}</p>
+      </details>`:"",z=e.tokenTransfers.length?`<section class="block">
         <h3>Токени, що проходили через UEA</h3>
         <div class="tx-list">
           ${e.tokenTransfers.slice(0,30).map(U=>{const L=U.from?.hash?.toLowerCase()===t,q=L?U.to?.hash:U.from?.hash,W=U.token?.symbol||U.token?.name||"токен",K=U.total?.decimals?Number(U.total.decimals):18,H=U.total?.value?ra(U.total.value,K,4):"—",X=U.tx_hash||U.transaction_hash||"",J=`<span class="tx-dir ${L?"out":"in"}">${L?"OUT":"IN"}</span>
