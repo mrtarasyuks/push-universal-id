@@ -1,4 +1,5 @@
 import { DONUT } from './chains';
+import { msg } from './i18n';
 
 // Thin typed wrapper over the public Blockscout REST API v2 running on
 // donut.push.network. No key, no backend — the browser calls it directly.
@@ -91,9 +92,7 @@ async function get<T>(path: string): Promise<T> {
       headers: { accept: 'application/json' },
     });
   } catch (e) {
-    throw new ApiError(
-      `Не вдалося звернутись до Blockscout (${(e as Error).message}). Можливо, мережа недоступна або CORS заблоковано.`
-    );
+    throw new ApiError(msg().errBlockscoutUnreachable((e as Error).message));
   }
   if (res.status === 404) {
     // Blockscout returns 404 for an address it has never seen — a valid
@@ -101,7 +100,7 @@ async function get<T>(path: string): Promise<T> {
     throw new ApiError('404');
   }
   if (!res.ok) {
-    throw new ApiError(`Blockscout відповів ${res.status}`);
+    throw new ApiError(msg().errBlockscoutStatus(res.status));
   }
   return (await res.json()) as T;
 }
@@ -277,13 +276,11 @@ export async function ethCall(to: string, data: string): Promise<string> {
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to, data }, 'latest'] }),
     });
   } catch (e) {
-    throw new ApiError(
-      `Не вдалося звернутись до RPC Push Chain (${(e as Error).message}).`
-    );
+    throw new ApiError(msg().errRpcUnreachable((e as Error).message));
   }
-  if (!res.ok) throw new ApiError(`RPC відповів ${res.status}`);
+  if (!res.ok) throw new ApiError(msg().errRpcStatus(res.status));
   const json = (await res.json()) as { result?: string; error?: { message?: string } };
-  if (json.error) throw new ApiError(json.error.message || 'Помилка eth_call');
-  if (typeof json.result !== 'string') throw new ApiError('Порожня відповідь eth_call');
+  if (json.error) throw new ApiError(json.error.message || msg().errEthCallGeneric);
+  if (typeof json.result !== 'string') throw new ApiError(msg().errEthCallEmpty);
   return json.result;
 }

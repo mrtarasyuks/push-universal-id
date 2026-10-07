@@ -9,6 +9,8 @@ import {
   DONUT,
   donutAddressUrl,
   donutTxUrl,
+  chainIconSvg,
+  reverseIconSvg,
 } from './chains';
 import { deriveUea, toCaip, isPushChain, resolveOrigin, verifyUeaOnchain, CHAIN } from './uea';
 import {
@@ -41,6 +43,7 @@ import {
 } from './actions';
 import { knownAddr, isInfra, tokenMeta, GATEWAY_PC_ADDRESS } from './known';
 import { shortAddr, formatUnits, formatInt, sumGasWei, timeAgo, nowUtc, formatDuration } from './format';
+import { msg, getLang, setLang, LANGS, LANG_CODE, type Lang, countWord, onLangChange } from './i18n';
 import { getAddress } from 'viem';
 import './style.css';
 
@@ -50,14 +53,33 @@ const el = {
   form: $('#lookup-form') as HTMLFormElement,
   address: $('#address') as HTMLInputElement,
   chain: $('#chain') as HTMLSelectElement,
-  examples: $('#examples'),
   result: $('#result'),
   status: $('#status'),
+  flash: $('#flash'),
+  bubbleBtn: $('#bubble-btn') as HTMLButtonElement,
+  searchRow: $('.search-row'),
+  networkSelect: $('#network-select'),
+  networkTrigger: $('#network-trigger') as HTMLButtonElement,
+  networkIcon: $('#network-icon'),
+  networkLabel: $('#network-label'),
+  networkList: $('#network-list'),
+  langSwitch: $('#lang-switch'),
+  logo: $('#logo'),
+  heroTitle: $('#hero-title'),
+  heroLede: $('#hero-lede'),
+  footerText: $('#footer-text'),
+  metaDescription: $('#meta-description') as HTMLMetaElement,
 };
 
 const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
 
+// Native <select id="chain"> stays in the DOM (hidden) purely as the single
+// source of truth for "which origin chain is picked" — run()/onChainChange()
+// read el.chain.value exactly as before. The visible control is the custom
+// dropdown below, which only ever writes to the hidden select and re-renders
+// its own trigger; nothing else in the app needs to know it exists.
 function buildChainOptions() {
+  el.chain.innerHTML = '';
   for (const c of ORIGIN_CHAINS) {
     const opt = document.createElement('option');
     opt.value = c.id;
@@ -66,56 +88,111 @@ function buildChainOptions() {
   }
   const rev = document.createElement('option');
   rev.value = REVERSE_ID;
-  rev.textContent = '↩︎ Це UEA на Push Chain (знайти origin)';
+  rev.textContent = msg().network.reverseOption;
   el.chain.appendChild(rev);
 }
 
-// Keep this to just the two most useful one-click examples (a forward lookup
-// and a reverse lookup) — a long row of buttons is clutter, not a shortcut.
-function buildExamples() {
-  el.examples.innerHTML = '';
-  const forward = ORIGIN_CHAINS[0]; // Ethereum Sepolia — a real owner with an active UEA
-  const fb = document.createElement('button');
-  fb.type = 'button';
-  fb.className = 'example';
-  fb.innerHTML = `<span class="example-chain">${forward.label}</span><span class="example-addr">${shortAddr(
-    forward.example,
-    8,
-    6
-  )}</span>`;
-  fb.title = forward.exampleNote;
-  fb.addEventListener('click', () => {
-    el.address.value = forward.example;
-    el.chain.value = forward.id;
-    onChainChange();
-    run();
-  });
-  el.examples.appendChild(fb);
+function networkIconHtml(id: string): string {
+  if (id === REVERSE_ID) return reverseIconSvg();
+  const def = findChain(id);
+  return def ? chainIconSvg(def.icon) : '';
+}
 
-  // A reverse-lookup example: the UEA we know maps back to the ETH Sepolia owner.
-  const rb = document.createElement('button');
-  rb.type = 'button';
-  rb.className = 'example example-reverse';
-  rb.innerHTML = `<span class="example-chain">↩︎ UEA → origin</span><span class="example-addr">${shortAddr(
-    '0x99Ea0aC8f7F7CbBBaf7ca61644Eef591d290ca4B',
-    8,
-    6
-  )}</span>`;
-  rb.title = 'Вставити UEA на Push Chain і знайти його origin-гаманець';
-  rb.addEventListener('click', () => {
-    el.address.value = '0x99Ea0aC8f7F7CbBBaf7ca61644Eef591d290ca4B';
-    el.chain.value = REVERSE_ID;
-    onChainChange();
-    run();
+function networkLabelText(id: string): string {
+  if (id === REVERSE_ID) return msg().network.reverseOption;
+  return findChain(id)?.label ?? id;
+}
+
+function buildNetworkDropdown() {
+  el.networkList.innerHTML = '';
+  const rows = [...ORIGIN_CHAINS.map((c) => c.id), REVERSE_ID];
+  for (const id of rows) {
+    const li = document.createElement('li');
+    li.setAttribute('role', 'option');
+    li.dataset.id = id;
+    li.tabIndex = -1;
+    li.className = id === REVERSE_ID ? 'network-option network-option-reverse' : 'network-option';
+    li.innerHTML = `${networkIconHtml(id)}<span>${escapeHtml(networkLabelText(id))}</span>`;
+    el.networkList.appendChild(li);
+  }
+  syncNetworkTrigger();
+}
+
+function syncNetworkTrigger() {
+  const id = el.chain.value;
+  el.networkIcon.innerHTML = networkIconHtml(id);
+  el.networkLabel.textContent = networkLabelText(id);
+  el.networkTrigger.setAttribute('aria-label', msg().network.aria);
+  el.networkList.querySelectorAll('.network-option').forEach((li) => {
+    li.setAttribute('aria-selected', String((li as HTMLElement).dataset.id === id));
   });
-  el.examples.appendChild(rb);
+}
+
+function closeNetworkDropdown() {
+  el.networkList.hidden = true;
+  el.networkTrigger.setAttribute('aria-expanded', 'false');
+}
+
+function openNetworkDropdown() {
+  el.networkList.hidden = false;
+  el.networkTrigger.setAttribute('aria-expanded', 'true');
+  const current = el.networkList.querySelector<HTMLElement>(`[data-id="${el.chain.value}"]`);
+  (current ?? el.networkList.querySelector<HTMLElement>('.network-option'))?.focus();
+}
+
+function selectNetwork(id: string) {
+  if (el.chain.value !== id) {
+    el.chain.value = id;
+    el.chain.dispatchEvent(new Event('change'));
+  }
+  syncNetworkTrigger();
+  closeNetworkDropdown();
+  el.networkTrigger.focus();
+}
+
+function wireNetworkDropdown() {
+  el.networkTrigger.addEventListener('click', () => {
+    if (el.networkList.hidden) openNetworkDropdown();
+    else closeNetworkDropdown();
+  });
+  el.networkList.addEventListener('click', (e) => {
+    const li = (e.target as HTMLElement).closest<HTMLElement>('.network-option');
+    if (li?.dataset.id) selectNetwork(li.dataset.id);
+  });
+  el.networkList.addEventListener('keydown', (e) => {
+    const items = [...el.networkList.querySelectorAll<HTMLElement>('.network-option')];
+    const idx = items.indexOf(document.activeElement as HTMLElement);
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeNetworkDropdown();
+      el.networkTrigger.focus();
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      items[Math.min(items.length - 1, idx + 1)]?.focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      items[Math.max(0, idx - 1)]?.focus();
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      const id = items[idx]?.dataset.id;
+      if (id) selectNetwork(id);
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (!el.networkSelect.contains(e.target as Node)) closeNetworkDropdown();
+  });
+  el.networkTrigger.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openNetworkDropdown();
+    }
+  });
 }
 
 function onChainChange() {
   const reverse = el.chain.value === REVERSE_ID;
-  el.address.placeholder = reverse
-    ? 'UEA-адреса на Push Chain (0x…)'
-    : '0x… або Solana-адреса';
+  el.address.placeholder = reverse ? msg().address.placeholderReverse : msg().address.placeholderForward;
+  syncNetworkTrigger();
 }
 
 function setStatus(msg: string, kind: 'info' | 'error' | 'muted' = 'info') {
@@ -132,7 +209,7 @@ function escapeHtml(s: string): string {
 
 /** A small "copy to clipboard" button carrying its payload in a data attribute;
  * a single delegated handler (wired after render) does the actual copy. */
-function copyBtn(text: string, title = 'Скопіювати'): string {
+function copyBtn(text: string, title = msg().copy.generic): string {
   return `<button type="button" class="copy-btn" data-copy="${escapeHtml(text)}" title="${escapeHtml(
     title
   )}" aria-label="${escapeHtml(title)}">⧉</button>`;
@@ -188,15 +265,6 @@ function decimalsOfText(s: string): number {
   return i < 0 ? 0 : s.length - i - 1;
 }
 
-// Ukrainian plural: 1 → one, 2–4 → few, else many (ignoring the teens).
-function plural(n: number, one: string, few: string, many: string): string {
-  const mod10 = n % 10;
-  const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return one;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
-  return many;
-}
-
 // ---- Rank: a simple, honest verdict computed only from the metrics shown
 // above (never anything not already on the page) ----
 interface Rank {
@@ -208,57 +276,37 @@ interface Rank {
 }
 
 /** Four tiers, each a strictly higher bar than the last. The exact thresholds
- * are also spelled out in the UI's "як рахується" fold, so nothing here is
- * hidden from the person reading their own result. */
+ * are also spelled out in the UI's "how is it calculated" fold, so nothing
+ * here is hidden from the person reading their own result. */
 function computeRank(deployed: boolean, txCountNum: number, realAppsCount: number, xcActionsCount: number): Rank {
+  const r = msg().rank;
   if (!deployed && txCountNum === 0) {
-    return {
-      key: 'none',
-      label: 'Ще не на радарі',
-      emoji: '🔘',
-      reason: 'UEA ще не задеплоєний і не має жодної активності на Push Chain.',
-      next: 'Зроби першу Universal-транзакцію з origin-гаманця — UEA розгорнеться автоматично.',
-    };
+    return { key: 'none', label: r.labels.none, emoji: '🔘', reason: r.noneReason, next: r.noneNext };
   }
   if (xcActionsCount > 0) {
     return {
       key: 'native',
-      label: 'Universal Native',
+      label: r.labels.native,
       emoji: '🟣',
-      reason: `Зробив ${xcActionsCount} ${plural(
-        xcActionsCount,
-        'крос-чейн дію',
-        'крос-чейн дії',
-        'крос-чейн дій'
-      )} через шлюз Push — це й є суть «Universal» на цьому чейні.`,
+      reason: r.nativeReason(xcActionsCount),
       next: null,
     };
   }
   if (txCountNum >= 5 && realAppsCount >= 2) {
     return {
       key: 'builder',
-      label: 'Builder',
+      label: r.labels.builder,
       emoji: '🔵',
-      reason: `${formatInt(txCountNum)} ${plural(
-        txCountNum,
-        'транзакція',
-        'транзакції',
-        'транзакцій'
-      )} і ${realAppsCount} ${plural(realAppsCount, 'застосунок', 'застосунки', 'застосунків')} на Push Chain, але ще без крос-чейн дій.`,
-      next: 'Зроби крос-чейн переказ або виклик через шлюз Push, щоб стати Universal Native.',
+      reason: r.builderReason(txCountNum, realAppsCount),
+      next: r.builderNext,
     };
   }
   return {
     key: 'explorer',
-    label: 'Explorer',
+    label: r.labels.explorer,
     emoji: '🟢',
-    reason: `UEA задеплоєний і має ${formatInt(txCountNum)} ${plural(
-      txCountNum,
-      'транзакцію',
-      'транзакції',
-      'транзакцій'
-    )}, але поки мало застосунків.`,
-    next: 'Спробуй ще кілька застосунків на Push Chain, щоб стати Builder.',
+    reason: r.explorerReason(txCountNum),
+    next: r.explorerNext,
   };
 }
 
@@ -361,17 +409,13 @@ function isUnlimited(n: bigint): boolean {
 
 const PAGE_CAP = 12; // safety cap for auto / "load all", ~600 items
 
-// A short, concrete loading sequence shown while we resolve the account and
-// pull its activity — plain skeleton cards instead of a blank page or a bare
-// spinner, so the wait reads as progress, not a stall.
-const LOADING_STEPS = ['Шукаю акаунт', 'Рахую активність', 'Готую результат'];
-
 function renderLoading(step: number) {
   delete el.result.dataset.paintedFor; // a new lookup animates its first paint again
+  const steps = msg().loading.steps;
   el.result.innerHTML = `
     <div class="card loading-card">
       <ol class="loading-steps">
-        ${LOADING_STEPS.map((s, i) => {
+        ${steps.map((s, i) => {
           const cls = i < step ? 'done' : i === step ? 'active' : '';
           const icon =
             i < step
@@ -397,16 +441,48 @@ function renderLoading(step: number) {
     </div>`;
 }
 
+// ---- Search animation: bubble pop → row shake while loading → page flash
+// right before the result lands. Only runs once per submit (not on the many
+// background re-renders that follow), so later data landing never "blinks". ----
+function popBubble() {
+  el.bubbleBtn.classList.remove('popping');
+  // restart the animation even if the button is still mid-pop from a fast re-submit
+  void el.bubbleBtn.offsetWidth;
+  el.bubbleBtn.classList.add('popping');
+  for (let i = 0; i < 2; i++) {
+    const ring = document.createElement('span');
+    ring.className = 'bubble-ring';
+    ring.style.animationDelay = `${i * 90}ms`;
+    el.bubbleBtn.appendChild(ring);
+    setTimeout(() => ring.remove(), 700);
+  }
+  setTimeout(() => el.bubbleBtn.classList.remove('popping'), 500);
+}
+
+function startRowShake() {
+  el.searchRow.classList.add('shaking');
+}
+
+function stopRowShakeAndFlash() {
+  el.searchRow.classList.remove('shaking');
+  el.flash.classList.remove('flashing');
+  void el.flash.offsetWidth;
+  el.flash.classList.add('flashing');
+  setTimeout(() => el.flash.classList.remove('flashing'), 700);
+}
+
 // ---- Core lookup ----
 async function run() {
   const rawInput = el.address.value.trim();
   const reverse = el.chain.value === REVERSE_ID;
   if (!rawInput) {
-    setStatus('Введіть адресу.', 'error');
+    setStatus(msg().errors.emptyAddress, 'error');
     return;
   }
   syncUrl(rawInput, el.chain.value);
   setStatus('', 'muted');
+  popBubble();
+  startRowShake();
   renderLoading(0);
 
   let uea: string;
@@ -423,7 +499,8 @@ async function run() {
       uea = getAddress(rawInput as `0x${string}`);
     } catch {
       el.result.innerHTML = '';
-      setStatus('Для зворотного пошуку введіть валідну EVM-адресу UEA на Push Chain (0x…).', 'error');
+      setStatus(msg().errors.invalidReverseAddress, 'error');
+      el.searchRow.classList.remove('shaking');
       return;
     }
     try {
@@ -436,19 +513,20 @@ async function run() {
       } else {
         originLabel = '—';
         originAddress = '—';
-        reverseNote =
-          'Фабрика Push не знає цієї адреси як UEA. Це або звичайний гаманець на Push Chain, або UEA, який ще не задеплоєний. Активність нижче — для самої введеної адреси.';
+        reverseNote = msg().mapping.noOriginNote;
       }
     } catch (e) {
       el.result.innerHTML = '';
-      setStatus(`Не вдалося зробити зворотний пошук: ${(e as Error).message}`, 'error');
+      setStatus(msg().errors.reverseLookupFailed((e as Error).message), 'error');
+      el.searchRow.classList.remove('shaking');
       return;
     }
   } else {
     const chainDef = findChain(el.chain.value);
     if (!chainDef) {
       el.result.innerHTML = '';
-      setStatus('Оберіть origin-чейн.', 'error');
+      setStatus(msg().errors.chooseChain, 'error');
+      el.searchRow.classList.remove('shaking');
       return;
     }
     try {
@@ -456,14 +534,12 @@ async function run() {
       caip = toCaip(chainDef.chain, rawInput);
     } catch (e) {
       el.result.innerHTML = '';
-      setStatus(
-        `Не вдалося обчислити UEA: ${(e as Error).message} Перевірте, що адреса валідна для обраного чейна.`,
-        'error'
-      );
+      setStatus(msg().errors.deriveUea((e as Error).message), 'error');
+      el.searchRow.classList.remove('shaking');
       return;
     }
     native = isPushChain(chainDef.chain);
-    originLabel = native ? 'Push Chain (вже тут)' : chainDef.label;
+    originLabel = native ? msg().chain.nativeLabel : chainDef.label;
     originAddress = rawInput;
     if (!native) verifyChain = chainDef.chain;
   }
@@ -493,30 +569,30 @@ async function run() {
     balanceWei = infoRes.value.coin_balance;
     deployed = !!infoRes.value.is_contract;
   } else if (!isNotFound(infoRes.reason)) {
-    warnings.push(`Баланс: ${(infoRes.reason as Error).message}`);
+    warnings.push(`${msg().warnings.balance}: ${(infoRes.reason as Error).message}`);
   }
   if (countersRes.status === 'fulfilled') {
     txCount = countersRes.value.transactions_count ?? '0';
     tokenXferCount = countersRes.value.token_transfers_count ?? '0';
   } else if (!isNotFound(countersRes.reason)) {
-    warnings.push(`Лічильники: ${(countersRes.reason as Error).message}`);
+    warnings.push(`${msg().warnings.counters}: ${(countersRes.reason as Error).message}`);
   }
   if (txRes.status === 'fulfilled') {
     txs = txRes.value.items;
     txNext = txRes.value.next_page_params;
   } else if (!isNotFound(txRes.reason)) {
-    warnings.push(`Транзакції: ${(txRes.reason as Error).message}`);
+    warnings.push(`${msg().warnings.transactions}: ${(txRes.reason as Error).message}`);
   }
   if (tokenRes.status === 'fulfilled') {
     tokenTransfers = tokenRes.value.items;
     tokNext = tokenRes.value.next_page_params;
   } else if (!isNotFound(tokenRes.reason)) {
-    warnings.push(`Токен-трансфери: ${(tokenRes.reason as Error).message}`);
+    warnings.push(`${msg().warnings.tokenTransfers}: ${(tokenRes.reason as Error).message}`);
   }
   if (balRes.status === 'fulfilled') {
     holdings = balRes.value;
   } else if (!isNotFound(balRes.reason)) {
-    warnings.push(`Баланси токенів: ${(balRes.reason as Error).message}`);
+    warnings.push(`${msg().warnings.tokenBalances}: ${(balRes.reason as Error).message}`);
   }
 
   state = {
@@ -555,6 +631,7 @@ async function run() {
 
   renderLoading(2);
   await resolveNames();
+  stopRowShakeAndFlash();
   render();
 
   // Confirm the offchain-derived UEA against the factory's own computeUEA, in
@@ -1041,7 +1118,7 @@ function render() {
       if (c.crossChain) {
         // Group by destination chain (the real "where did it go") — the exact
         // chain from the gateway event when known, else the token-derived guess.
-        const chain = c.crossChain.exactChain ?? c.crossChain.chain ?? 'інший чейн';
+        const chain = c.crossChain.exactChain ?? c.crossChain.chain ?? msg().chain.unknown;
         const app = ensure(`xc:${chain}`, {
           label: `→ ${chain}`,
           chain,
@@ -1052,7 +1129,7 @@ function render() {
         if (c.crossChain.rescued) app.rescued += 1;
         if (c.crossChain.amount > 0n) {
           const key = c.crossChain.token.toLowerCase();
-          const sym = c.crossChain.tokenSymbol ?? 'токен';
+          const sym = c.crossChain.tokenSymbol ?? msg().token.generic;
           const prev = app.bridged.get(key) ?? { symbol: sym, amount: 0n };
           prev.amount += c.crossChain.amount;
           app.bridged.set(key, prev);
@@ -1088,37 +1165,37 @@ function render() {
   );
 
   const statusBadge = m.deployed
-    ? `<span class="badge badge-ok">UEA задеплоєний</span>`
-    : `<span class="badge badge-pending">UEA ще не задеплоєний</span>`;
+    ? `<span class="badge badge-ok">${escapeHtml(msg().badge.deployed)}</span>`
+    : `<span class="badge badge-pending">${escapeHtml(msg().badge.pending)}</span>`;
 
   const balance = formatUnits(m.balanceWei, DONUT.nativeDecimals, 4);
 
   // ---- mapping ----
   const originNodeInner = m.reverse && m.reverseNote
-    ? `<div class="map-addr map-muted">невідомо</div>
-       <div class="map-caip">фабрика не має origin для цього UEA</div>`
+    ? `<div class="map-addr map-muted">${escapeHtml(msg().mapping.unknown)}</div>
+       <div class="map-caip">${escapeHtml(msg().mapping.noOriginShort)}</div>`
     : `<div class="map-addr-row">
          <div class="map-addr" title="${escapeHtml(m.originAddress)}">${escapeHtml(
         shortAddr(m.originAddress, 10, 8)
       )}</div>
-         ${copyBtn(m.originAddress, 'Скопіювати origin-адресу')}
+         ${copyBtn(m.originAddress, msg().copy.copyOriginAddress)}
        </div>
        <div class="map-caip">${escapeHtml(m.caip)}</div>`;
 
   const mapping = `
     <div class="mapping">
       <div class="map-node">
-        <div class="map-label">Origin${m.reverse ? ' (знайдено за UEA)' : ` (${escapeHtml(m.originLabel)})`}</div>
+        <div class="map-label">${m.reverse ? escapeHtml(msg().mapping.originFoundLabel) : escapeHtml(msg().mapping.originLabel(m.originLabel))}</div>
         ${originNodeInner}
       </div>
-      <div class="map-arrow">${m.reverse ? '← UEA ←' : '→ UEA →'}</div>
+      <div class="map-arrow">${m.reverse ? msg().mapping.arrowReverse : msg().mapping.arrowForward}</div>
       <div class="map-node map-node-uea">
-        <div class="map-label">Universal Executor Account · Push Chain Donut</div>
+        <div class="map-label">${escapeHtml(msg().mapping.ueaLabel)}</div>
         <div class="map-addr-row">
           <a class="map-addr" href="${donutAddressUrl(m.uea)}" target="_blank" rel="noopener" title="${escapeHtml(
     m.uea
   )}">${escapeHtml(shortAddr(m.uea, 12, 10))} ↗</a>
-          ${copyBtn(m.uea, 'Скопіювати адресу UEA')}
+          ${copyBtn(m.uea, msg().copy.copyUeaAddress)}
         </div>
       </div>
     </div>`;
@@ -1126,13 +1203,13 @@ function render() {
   // On-chain verification of the derived UEA (forward lookups only).
   const verifyHtml =
     m.verify === 'ok'
-      ? `<p class="hint verify-ok">✓ Адресу UEA підтверджено <strong>на самій фабриці Push</strong> (<code>computeUEA</code>, read-only) — не лише обчислено офчейн.</p>`
+      ? `<p class="hint verify-ok">${msg().verify.ok}</p>`
       : m.verify === 'pending'
-      ? `<p class="hint">Перевіряю адресу на фабриці Push on-chain…</p>`
+      ? `<p class="hint">${escapeHtml(msg().verify.pending)}</p>`
       : m.verify === 'mismatch'
-      ? `<p class="hint hint-warn">⚠ Офчейн-обчислення (CREATE2) не збіглося з <code>computeUEA</code> фабрики. Показую офчейн-результат — звірте вручну в експлорері.</p>`
+      ? `<p class="hint hint-warn">${msg().verify.mismatch}</p>`
       : m.verify === 'unavailable'
-      ? `<p class="hint">Фабрика зараз недоступна для on-chain перевірки — адресу обчислено офчейн (CREATE2, ідентично SDK).</p>`
+      ? `<p class="hint">${escapeHtml(msg().verify.unavailable)}</p>`
       : '';
 
   const reverseNoteHtml = m.reverseNote
@@ -1142,36 +1219,41 @@ function render() {
   const sdkNote =
     m.deployed || m.reverse
       ? ''
-      : `<p class="hint">Акаунт розгортається «ліниво» — при першій Universal-транзакції з гаманця-власника. Адреса вже зарезервована детерміновано (CREATE2), тож вона не зміниться.</p>`;
+      : `<p class="hint">${escapeHtml(msg().hints.lazyDeploy)}</p>`;
 
   const txCountNum = Number(m.txCount) || 0;
   const tokenXferNum = Number(m.tokenXferCount) || 0;
   const balanceNum = Number(balance.replace(/\s/g, '')) || 0;
 
-  const metrics = `
-    <div class="metrics">
-      <div class="metric">
-        <div class="metric-value">${countSpan(balanceNum, balance, decimalsOfText(balance))} <span class="unit">PC</span></div>
-        <div class="metric-label">Баланс UEA</div>
-      </div>
-      <div class="metric">
-        <div class="metric-value">${countSpan(txCountNum, formatInt(m.txCount))}</div>
-        <div class="metric-label">Транзакцій усього</div>
-      </div>
-      <div class="metric">
-        <div class="metric-value">${countSpan(tokenXferNum, formatInt(m.tokenXferCount))}</div>
-        <div class="metric-label">Токен-трансферів</div>
-      </div>
-      <div class="metric">
-        <div class="metric-value">${countSpan(appList.length, String(appList.length))}</div>
-        <div class="metric-label">Застосунків${m.autoLoading ? ' (рахую…)' : ''}</div>
-      </div>
-    </div>`;
-
   // ---- verdict: a simple rank from the metrics above, rules shown in full ----
   const realAppsCount = appList.filter((p) => !p.crossChain).length;
   const xcActionsCount = appList.filter((p) => p.crossChain).reduce((s, p) => s + p.actions, 0);
   const rank = computeRank(m.deployed, txCountNum, realAppsCount, xcActionsCount);
+
+  const metrics = `
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-value">${countSpan(balanceNum, balance, decimalsOfText(balance))} <span class="unit">PC</span></div>
+        <div class="metric-label">${escapeHtml(msg().metrics.balance)}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-value">${countSpan(txCountNum, formatInt(m.txCount))}</div>
+        <div class="metric-label">${escapeHtml(msg().metrics.txTotal)}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-value">${countSpan(tokenXferNum, formatInt(m.tokenXferCount))}</div>
+        <div class="metric-label">${escapeHtml(msg().metrics.tokenTransfers)}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-value">${countSpan(appList.length, String(appList.length))}</div>
+        <div class="metric-label">${escapeHtml(m.autoLoading ? msg().metrics.appsCounting : msg().metrics.apps)}</div>
+      </div>
+      <div class="metric metric-rank">
+        <div class="metric-value metric-rank-value"><span class="verdict-emoji" aria-hidden="true">${rank.emoji}</span> ${escapeHtml(rank.label)}</div>
+        <div class="metric-label">${escapeHtml(msg().metrics.rank)}</div>
+      </div>
+    </div>`;
+
   const verdict = `
     <div class="verdict verdict-${rank.key}">
       <div class="verdict-top">
@@ -1179,32 +1261,27 @@ function render() {
     rank.label
   )}</span>
         <details class="verdict-rules">
-          <summary>Як рахується ранг?</summary>
+          <summary>${escapeHtml(msg().rank.rulesSummary)}</summary>
           <ul>
-            <li>🔘 Ще не на радарі — UEA не задеплоєний і без жодної активності</li>
-            <li>🟢 Explorer — UEA задеплоєний, активність є, але ще мало</li>
-            <li>🔵 Builder — 5+ транзакцій і 2+ застосунки, без крос-чейн дій</li>
-            <li>🟣 Universal Native — хоча б одна крос-чейн дія через шлюз Push</li>
+            ${msg().rank.rules.map((r) => `<li>${escapeHtml(r)}</li>`).join('')}
           </ul>
-          <p>Рахується лише з реальних метрик цього UEA, завантажених вище${
-            m.autoLoading ? ' (ще рахуються — ранг може підвищитись)' : ''
-          }.</p>
+          <p>${escapeHtml(msg().rank.footnote(m.autoLoading))}</p>
         </details>
       </div>
       <p class="verdict-reason">${escapeHtml(rank.reason)}</p>
       ${
         rank.next
-          ? `<p class="verdict-next">Наступний рівень: ${escapeHtml(rank.next)}</p>`
-          : `<p class="verdict-next verdict-max">Це найвищий рівень у цій версії інструмента.</p>`
+          ? `<p class="verdict-next">${escapeHtml(msg().rank.nextLevelPrefix)}${escapeHtml(rank.next)}</p>`
+          : `<p class="verdict-next verdict-max">${escapeHtml(msg().rank.maxLevel)}</p>`
       }
     </div>`;
 
   // ---- universal actions ----
   const actionsHtml = actions.length
     ? `<section class="block">
-        <h3>Універсальні дії <span class="count-badge">${actions.length}</span></h3>
-        <p class="hint">Декодовано з <code>executeUniversalTx</code> — справжній цільовий застосунок кожної дії, а не релеєр. Крос-чейн дії через шлюз показують чейн, метод і аргументи виклику на призначенні, статус доставки та пряме посилання на експлорер чейна-призначення («кінець мосту»). Доставку <strong>підтверджуємо на самому чейні призначення</strong> (через його Blockscout API): подія <code>UniversalTxExecuted/Finalized</code> з тим самим <code>subTxId</code> = ✓ доставлено, з часом мосту.${
-          m.deliveryActive ? ' <span class="muted">Перевіряю доставку на чейнах призначення…</span>' : ''
+        <h3>${escapeHtml(msg().actions.title)} <span class="count-badge">${actions.length}</span></h3>
+        <p class="hint">${msg().actions.hint}${
+          m.deliveryActive ? ` <span class="muted">${escapeHtml(msg().actions.checking)}</span>` : ''
         }</p>
         <div class="tx-list">
           ${actions
@@ -1218,15 +1295,15 @@ function render() {
   // ---- top apps summary (grouped, with per-app totals) ----
   const appsHtml = appList.length
     ? `<section class="block">
-        <h3>Топ-застосунки UEA <span class="count-badge">${appList.length}</span></h3>
-        <p class="hint">Згруповано за застосунком: скільки дій і скільки PC припало на кожен. Крос-чейн дії зведені за точним чейном призначення (з події шлюзу UniversalTxOutbound).</p>
+        <h3>${escapeHtml(msg().apps.title)} <span class="count-badge">${appList.length}</span></h3>
+        <p class="hint">${escapeHtml(msg().apps.hint)}</p>
         <ul class="apps">
           ${appList
             .slice(0, 30)
             .map((p) => {
               const nums: string[] = [];
-              if (p.actions) nums.push(`${p.actions} ${plural(p.actions, 'дія', 'дії', 'дій')}`);
-              if (p.tokens) nums.push(`${p.tokens} ${plural(p.tokens, 'токен', 'токени', 'токенів')}`);
+              if (p.actions) nums.push(countWord(p.actions, msg().words.action));
+              if (p.tokens) nums.push(countWord(p.tokens, msg().words.token));
               if (p.pcWei > 0n) nums.push(`${formatUnits(p.pcWei.toString(), DONUT.nativeDecimals, 4)} PC`);
               if (p.crossChain) {
                 const bridged = [...p.bridged.entries()]
@@ -1236,17 +1313,12 @@ function render() {
                   )
                   .join(', ');
                 const rescuedNote = p.rescued
-                  ? `<span class="st st-rescued" title="Для цього напрямку шлюз повернув кошти на Push (RescueFundsOnSourceChain) — доставка не завершилась. Збіг за напрямком.">↩ ${p.rescued} ${plural(
-                      p.rescued,
-                      'повернення',
-                      'повернення',
-                      'повернень'
-                    )}</span>`
+                  ? `<span class="st st-rescued" title="${escapeHtml(msg().apps.rescuedTitle)}">${escapeHtml(msg().apps.rescuedNote(p.rescued))}</span>`
                   : '';
                 return `<li class="app app-xc">
-                  <span class="app-name"><span class="xc-badge">крос-чейн</span> ${escapeHtml(p.label)} ${rescuedNote}</span>
+                  <span class="app-name"><span class="xc-badge">${escapeHtml(msg().apps.xcBadge)}</span> ${escapeHtml(p.label)} ${rescuedNote}</span>
                   <span class="app-nums">${nums.join(' · ')}${
-                  bridged ? ` · міст: ${bridged}` : ''
+                  bridged ? ` · ${escapeHtml(msg().apps.bridgePrefix)} ${bridged}` : ''
                 }</span>
                 </li>`;
               }
@@ -1257,7 +1329,7 @@ function render() {
                   <a href="${donutAddressUrl(p.addr!)}" target="_blank" rel="noopener">${escapeHtml(
                     label
                   )} ↗</a>
-                  ${info.isContract ? '<span class="tag">контракт</span>' : ''}
+                  ${info.isContract ? `<span class="tag">${escapeHtml(msg().apps.contractTag)}</span>` : ''}
                 </span>
                 <span class="app-nums">${nums.join(' · ')}</span>
               </li>`;
@@ -1271,7 +1343,7 @@ function render() {
   // folded: an active account can have hundreds of relayers — a wall of addresses buried the rest of the page
   const relayerHtml = m.relayers.size
     ? `<details class="hint relayers">
-        <summary>Транзакції подавали релеєри Push (${m.relayers.size}) — інфраструктура мережі, вони ж сплачують газ за UEA. Показати адреси</summary>
+        <summary>${escapeHtml(msg().relayers.summary(m.relayers.size))}</summary>
         <p>${[...m.relayers]
           .map(
             (r) =>
@@ -1286,14 +1358,14 @@ function render() {
   // ---- tokens ----
   const tokenHtml = m.tokenTransfers.length
     ? `<section class="block">
-        <h3>Токени, що проходили через UEA</h3>
+        <h3>${escapeHtml(msg().tokens.title)}</h3>
         <div class="tx-list">
           ${m.tokenTransfers
             .slice(0, 30)
             .map((tt) => {
               const out = tt.from?.hash?.toLowerCase() === ueaLc;
               const counter = out ? tt.to?.hash : tt.from?.hash;
-              const sym = tt.token?.symbol || tt.token?.name || 'токен';
+              const sym = tt.token?.symbol || tt.token?.name || msg().token.generic;
               const dec = tt.total?.decimals ? Number(tt.total.decimals) : 18;
               const amount = tt.total?.value ? formatUnits(tt.total.value, dec, 4) : '—';
               const hash = tt.tx_hash || tt.transaction_hash || '';
@@ -1308,19 +1380,13 @@ function render() {
             })
             .join('')}
         </div>
-        <p class="hint">${tokenSet.size} ${
-        tokenSet.size === 1 ? 'унікальний токен' : 'унікальних токенів'
-      } · показано до 30 трансферів із завантажених.</p>
+        <p class="hint">${escapeHtml(msg().tokens.summary(tokenSet.size))}</p>
       </section>`
     : '';
 
   const gasHtml =
     gasWei !== '0'
-      ? `<p class="hint">Газ, сплачений власними транзакціями UEA: ${formatUnits(
-          gasWei,
-          DONUT.nativeDecimals,
-          6
-        )} PC (за ${outgoing.length} вихідних tx).</p>`
+      ? `<p class="hint">${escapeHtml(msg().hints.gasPaid(formatUnits(gasWei, DONUT.nativeDecimals, 6), outgoing.length))}</p>`
       : '';
 
   // ---- current token holdings (portfolio the UEA holds right now) ----
@@ -1339,7 +1405,7 @@ function render() {
       const dec = isNft ? 0 : h.token?.decimals && /^\d+$/.test(h.token.decimals) ? Number(h.token.decimals) : 18;
       return {
         addr,
-        symbol: h.token?.symbol || h.token?.name || (isNft ? 'NFT' : 'токен'),
+        symbol: h.token?.symbol || h.token?.name || (isNft ? msg().holdings.nftTag : msg().token.generic),
         chain: meta?.chain ?? null,
         value: BigInt(h.value!),
         amount: formatUnits(h.value!, dec, 4),
@@ -1354,8 +1420,8 @@ function render() {
 
   const holdingsHtml = heldTokens.length
     ? `<section class="block">
-        <h3>Токени на балансі UEA <span class="count-badge">${heldTokens.length}</span></h3>
-        <p class="hint">Що UEA тримає на Push Chain зараз (поточні баланси з Blockscout). Для бриджених активів показано, який зовнішній чейн вони представляють.</p>
+        <h3>${escapeHtml(msg().holdings.title)} <span class="count-badge">${heldTokens.length}</span></h3>
+        <p class="hint">${escapeHtml(msg().holdings.hint)}</p>
         <ul class="apps">
           ${heldTokens
             .slice(0, 30)
@@ -1366,9 +1432,9 @@ function render() {
                 t.symbol
               )} ↗</a>
                   ${t.chain ? `<span class="tag">${escapeHtml(t.chain)}</span>` : ''}
-                  ${t.isNft ? '<span class="tag">NFT</span>' : ''}
+                  ${t.isNft ? `<span class="tag">${escapeHtml(msg().holdings.nftTag)}</span>` : ''}
                 </span>
-                <span class="app-nums">${escapeHtml(t.amount)}${t.isNft ? ' шт' : ` ${escapeHtml(t.symbol)}`}</span>
+                <span class="app-nums">${escapeHtml(t.amount)}${t.isNft ? ` ${escapeHtml(msg().holdings.nftUnit)}` : ` ${escapeHtml(t.symbol)}`}</span>
               </li>`
             )
             .join('')}
@@ -1385,7 +1451,7 @@ function render() {
 
   const txHtml = m.txs.length
     ? `<section class="block">
-        <h3>Транзакції UEA</h3>
+        <h3>${escapeHtml(msg().tx.title)}</h3>
         <div class="tx-list">
           ${m.txs
             .slice(0, 40)
@@ -1406,43 +1472,39 @@ function render() {
     : hasActivity
     ? ''
     : `<section class="block empty">
-        <h3>Поки немає активності на Donut</h3>
-        <p>Blockscout не бачить транзакцій цього UEA. Для зовнішнього гаманця це нормально: UEA
-        з'явиться при першій Universal-транзакції. Адреса вже обчислена й зарезервована.</p>
+        <h3>${escapeHtml(msg().tx.emptyTitle)}</h3>
+        <p>${escapeHtml(msg().tx.emptyBody)}</p>
       </section>`;
 
   // ---- pagination: background progress + manual fallback ----
   const hasMore = !!(m.txNext || m.tokNext);
-  const loaded = `${m.txs.length} ${plural(m.txs.length, 'транзакція', 'транзакції', 'транзакцій')} і ${
-    m.tokenTransfers.length
-  } ${plural(m.tokenTransfers.length, 'токен-трансфер', 'токен-трансфери', 'токен-трансферів')}`;
+  const loaded = msg().pagination.loadedText(m.txs.length, m.tokenTransfers.length);
   let loadMoreHtml = '';
   if (m.autoLoading) {
     // Indeterminate progress while we pull the rest of the history in the back.
     loadMoreHtml = `<div class="loadmore">
       <div class="progress"><div class="progress-bar"></div></div>
-      <p class="hint">Фоново завантажую всю історію… сторінка ${m.autoPages + 1}, уже ${loaded}. Газ і топ-застосунки оновлюються наживо.
-        <button type="button" class="load-btn ghost" id="load-stop">Зупинити</button>
+      <p class="hint">${escapeHtml(msg().pagination.autoLoading(m.autoPages + 1, loaded))}
+        <button type="button" class="load-btn ghost" id="load-stop">${escapeHtml(msg().pagination.stopBtn)}</button>
       </p>
     </div>`;
   } else if (m.loadingMore) {
-    loadMoreHtml = `<div class="loadmore"><button type="button" class="load-btn" disabled>Завантажую…</button></div>`;
+    loadMoreHtml = `<div class="loadmore"><button type="button" class="load-btn" disabled>${escapeHtml(msg().pagination.loadingBtn)}</button></div>`;
   } else if (hasActivity && hasMore) {
     // Auto-load stopped at the page cap but more remains.
+    const cappedNote = m.autoStopped ? msg().pagination.cappedNote(PAGE_CAP) : '';
     loadMoreHtml = `<div class="loadmore">
-      <p class="hint">Показано перші ${loaded}${
-      m.autoStopped ? ` (ліміт автозавантаження — ${PAGE_CAP} сторінок)` : ''
-    }. Є ще — підвантажити?</p>
-      <button type="button" class="load-btn" id="load-more">Завантажити ще сторінку</button>
-      <button type="button" class="load-btn secondary" id="load-all">Завантажити все, що лишилось</button>
+      <p class="hint">${escapeHtml(msg().pagination.hasMoreText(loaded, cappedNote))}</p>
+      <button type="button" class="load-btn" id="load-more">${escapeHtml(msg().pagination.loadMoreBtn)}</button>
+      <button type="button" class="load-btn secondary" id="load-all">${escapeHtml(msg().pagination.loadAllBtn)}</button>
     </div>`;
   } else if (hasActivity) {
-    loadMoreHtml = `<p class="hint">Пораховано за всю історію: ${loaded} (усе, що є в експлорера).</p>`;
+    loadMoreHtml = `<p class="hint">${escapeHtml(msg().pagination.doneAllText(loaded))}</p>`;
   }
 
   const warningsHtml = m.warnings.length
     ? `<section class="block warn">
-        <h3>Частина даних недоступна</h3>
+        <h3>${escapeHtml(msg().warnings.title)}</h3>
         <ul>${m.warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join('')}</ul>
       </section>`
     : '';
@@ -1459,7 +1521,7 @@ function render() {
         <div class="card-head-right">
           <button type="button" class="copy-btn copy-link" data-copy="${escapeHtml(
             window.location.href
-          )}" title="Скопіювати посилання на цей результат">🔗 Посилання</button>
+          )}" title="${escapeHtml(msg().copy.shareLinkTitle)}">${escapeHtml(msg().copy.shareLinkLabel)}</button>
           ${statusBadge}
         </div>
       </div>
@@ -1478,9 +1540,7 @@ function render() {
       ${txHtml}
       ${loadMoreHtml}
       ${warningsHtml}
-      <p class="source">Origin↔UEA — фабрика Push (${escapeHtml(
-        DONUT.explorer
-      )}) та offchain CREATE2 (@pushchain/core) · активність і декодування з Blockscout · крос-чейн напрямок, метод і статус — події UniversalTxOutbound / RescueFundsOnSourceChain через eth_getLogs · ${nowUtc()}</p>
+      <p class="source">${escapeHtml(msg().source.footerLine(DONUT.explorer))}${nowUtc()}</p>
     </div>`;
 
   if (repaint) {
@@ -1506,8 +1566,8 @@ function renderAction(a: UniversalAction): string {
   if (!a.calls.length) {
     return `<a class="tx" href="${donutTxUrl(a.txHash)}" target="_blank" rel="noopener">
       <span class="tx-dir out">ACT</span>
-      <span class="tx-method">${a.isMulticall ? 'мультиколл' : 'universal tx'}</span>
-      <span class="tx-counter">ціль не декодовано</span>
+      <span class="tx-method">${escapeHtml(a.isMulticall ? msg().actions.multicallLabel : msg().actions.universalTxLabel)}</span>
+      <span class="tx-counter">${escapeHtml(msg().actions.targetNotDecoded)}</span>
       <span class="tx-val"></span>
       <span class="tx-time">${time}</span>
     </a>`;
@@ -1533,7 +1593,7 @@ function renderCall(
     // Prefer the exact chain from the UniversalTxOutbound event; fall back to the
     // token-derived guess. A ✓ marks a destination confirmed from the event.
     const exact = !!x.exactChain;
-    const chain = x.exactChain ?? x.chain ?? 'інший чейн';
+    const chain = x.exactChain ?? x.chain ?? msg().chain.unknown;
     const mark = exact ? '<span class="xc-exact" aria-hidden="true">✓</span>' : '';
     const dest = x.recipient ? ` · ${escapeHtml(shortAddr(x.recipient, 8, 6))}` : '';
     // The method this action invokes on the destination contract, decoded from
@@ -1547,15 +1607,13 @@ function renderCall(
         ? ` · ${dc.inner.map((n) => escapeHtml(n)).join(' → ')}`
         : '';
     const kind = x.hasPayload
-      ? `крос-чейн виклик${methodName ? ` · ${escapeHtml(methodName)}()${innerTxt}` : ''}`
-      : 'крос-чейн переказ';
-    const chainTitle = exact
-      ? `точний чейн призначення з події шлюзу UniversalTxOutbound`
-      : `чейн виведено з бриджевого токена (подію шлюзу не знайдено)`;
+      ? `${escapeHtml(msg().actions.xcCallLabel)}${methodName ? ` · ${escapeHtml(methodName)}()${innerTxt}` : ''}`
+      : escapeHtml(msg().actions.xcTransferLabel);
+    const chainTitle = exact ? msg().actions.xcChainTitleExact : msg().actions.xcChainTitleGuess;
     const bridged =
       x.amount > 0n
         ? `${formatUnits(x.amount.toString(), decimalsOf(x.token), 4)} ${escapeHtml(
-            x.tokenSymbol ?? 'токен'
+            x.tokenSymbol ?? msg().token.generic
           )}`
         : x.tokenSymbol
         ? escapeHtml(x.tokenSymbol)
@@ -1566,21 +1624,21 @@ function renderCall(
     // just the selector. Only shown when we could decode them unambiguously.
     let callDetail = '';
     if (dc && dc.recipient) {
-      const who = dc.selector === '0x095ea7b3' ? 'spender' : 'отримувач';
+      const who = dc.selector === '0x095ea7b3' ? msg().actions.spenderWord : msg().actions.recipientWord;
       const amt =
         dc.amount == null
           ? ''
           : ` · ${isUnlimited(dc.amount) ? '∞' : formatUnits(dc.amount.toString(), decimalsOf(x.token), 4)} ${escapeHtml(
-              x.tokenSymbol ?? 'токен'
+              x.tokenSymbol ?? msg().token.generic
             )}`;
-      callDetail = `<span class="xc-call" title="Декодовано з payload події шлюзу — аргументи методу на контракті призначення">${escapeHtml(
+      callDetail = `<span class="xc-call" title="${escapeHtml(msg().actions.xcCallDetailArgsTitle)}">${escapeHtml(
         dc.method || dc.selector
-      )} · ${who} ${escapeHtml(shortAddr(dc.recipient, 8, 6))}${amt}</span>`;
+      )} · ${escapeHtml(who)} ${escapeHtml(shortAddr(dc.recipient, 8, 6))}${amt}</span>`;
     } else if (dc && dc.inner && dc.inner.length) {
       // A batched call we could not decode to a single recipient/amount — show the
       // inner methods instead, so a swap/multicall still reads as what it does.
-      callDetail = `<span class="xc-call" title="Внутрішні виклики пакета (multicall), декодовані з payload події шлюзу через ABI адресної книги SDK">${escapeHtml(
-        dc.method || 'multicall'
+      callDetail = `<span class="xc-call" title="${escapeHtml(msg().actions.xcCallDetailBatchTitle)}">${escapeHtml(
+        dc.method || msg().actions.multicallLabel
       )}: ${dc.inner.map((n) => escapeHtml(n)).join(' → ')}</span>`;
     }
 
@@ -1594,37 +1652,38 @@ function renderCall(
     // Bridge time: how long the hop took (Push send → destination settlement).
     const bridgeTxt =
       delivered && delivered.ok && delivered.bridgeSeconds != null
-        ? ` · міст ${formatDuration(delivered.bridgeSeconds)}`
+        ? msg().bridge.time(formatDuration(delivered.bridgeSeconds))
         : '';
+    const S = msg().status;
     const st =
       delivered && delivered.ok
-        ? { cls: 'st-delivered', text: `✓ доставлено на ${escapeHtml(delivered.chainLabel)}${bridgeTxt}`, title: `Підтверджено з Blockscout самого ${delivered.chainLabel}: його UniversalGateway/Vault емітив UniversalTxExecuted/Finalized із тим самим subTxId.${delivered.bridgeSeconds != null ? ` Час мосту — від виклику на Push до події доставки на призначенні — ${formatDuration(delivered.bridgeSeconds)}.` : ''}` }
+        ? { cls: 'st-delivered', text: S.delivered.text(delivered.chainLabel, bridgeTxt), title: S.delivered.title(delivered.chainLabel, bridgeTxt) }
         : delivered && !delivered.ok
-        ? { cls: 'st-fail', text: `✗ відхилено на ${escapeHtml(delivered.chainLabel)}`, title: `Підтверджено з Blockscout ${delivered.chainLabel}: на призначенні емітовано UniversalTxReverted/FundsRescued із тим самим subTxId — доставка не відбулась.` }
+        ? { cls: 'st-fail', text: S.failDest.text(delivered.chainLabel), title: S.failDest.title(delivered.chainLabel) }
         : !a.ok
-        ? { cls: 'st-fail', text: '✗ не виконано (Push)', title: 'executeUniversalTx завершився помилкою на Push — крос-чейн дію не відправлено.' }
+        ? { cls: 'st-fail', text: S.failPush.text, title: S.failPush.title }
         : x.rescued
-        ? { cls: 'st-rescued', text: '↩ повернуто (rescue)', title: 'Шлюз Push емітив RescueFundsOnSourceChain для цього самого universalTxId (sha256 від tx-хеша цієї дії) і цього токена/чейна: кошти повернулись на Push, доставка не завершилась.' }
-        : { cls: 'st-sent', text: '↗ надіслано (Push)', title: 'Надіслано зі шлюзу Push. Доставку з Blockscout призначення поки не підтверджено (ще в дорозі, або в того чейна немає CORS-дружнього Blockscout). Можна перевірити вручну за посиланням.' };
+        ? { cls: 'st-rescued', text: S.rescued.text, title: S.rescued.title }
+        : { cls: 'st-sent', text: S.sent.text, title: S.sent.title };
 
     // The link: to the actual settling tx on the destination chain when we have
     // it (the real end of the bridge), else to the recipient address there.
     const addrLink = destExplorerUrl(x.exactNamespace ?? x.caip, x.recipient);
     const destLink =
       delivered && delivered.destTxUrl
-        ? `<a class="xc-dest" href="${delivered.destTxUrl}" target="_blank" rel="noopener" title="Транзакція доставки на ${escapeHtml(
-            delivered.chainLabel
-          )}">кінець мосту: ${escapeHtml(delivered.chainLabel)} tx ↗</a>`
+        ? `<a class="xc-dest" href="${delivered.destTxUrl}" target="_blank" rel="noopener" title="${escapeHtml(
+            msg().bridge.txTitle(delivered.chainLabel)
+          )}">${escapeHtml(msg().bridge.endTx(delivered.chainLabel))}</a>`
         : addrLink
-        ? `<a class="xc-dest" href="${addrLink.url}" target="_blank" rel="noopener" title="Відкрити отримувача на ${escapeHtml(
-            addrLink.label
-          )} — кінець мосту">кінець мосту: ${escapeHtml(addrLink.label)} ↗</a>`
+        ? `<a class="xc-dest" href="${addrLink.url}" target="_blank" rel="noopener" title="${escapeHtml(
+            msg().bridge.addrTitle(addrLink.label)
+          )}">${escapeHtml(msg().bridge.endAddr(addrLink.label))}</a>`
         : '';
 
     return `<div class="tx-xc-wrap">
-      <a class="tx tx-xc" href="${donutTxUrl(a.txHash)}" target="_blank" rel="noopener" title="Шлюз → ${escapeHtml(
-      chain
-    )} — ${chainTitle}${x.recipient ? ` · отримувач ${escapeHtml(x.recipient)}` : ''}">
+      <a class="tx tx-xc" href="${donutTxUrl(a.txHash)}" target="_blank" rel="noopener" title="${escapeHtml(
+      msg().bridge.gatewayTitle(chain, chainTitle, x.recipient)
+    )}">
         <span class="tx-dir xc">⇄ CC</span>
         <span class="tx-method">${kind}${tag}</span>
         <span class="tx-counter">→ ${escapeHtml(chain)}${mark}${dest}</span>
@@ -1643,8 +1702,8 @@ function renderCall(
   const label = info.name || shortAddr(c.to, 8, 6);
   const method = selectorLabel(c.selector) || (c.selector ? c.selector : '—');
   const pc = c.value > 0n ? `${formatUnits(c.value.toString(), DONUT.nativeDecimals, 4)} PC` : '';
-  return `<a class="tx" href="${donutTxUrl(a.txHash)}" target="_blank" rel="noopener" title="Ціль: ${escapeHtml(
-    c.to
+  return `<a class="tx" href="${donutTxUrl(a.txHash)}" target="_blank" rel="noopener" title="${escapeHtml(
+    msg().actions.targetTitle(c.to)
   )}">
     <span class="tx-dir out">→APP</span>
     <span class="tx-method">${escapeHtml(method)}${tag}</span>
@@ -1683,7 +1742,7 @@ function wireCopy() {
     try {
       await navigator.clipboard.writeText(text);
       btn.classList.add('copied');
-      btn.innerHTML = btn.classList.contains('copy-link') ? '✓ Скопійовано' : '✓';
+      btn.innerHTML = btn.classList.contains('copy-link') ? escapeHtml(msg().copy.copiedLink) : '✓';
     } catch {
       btn.innerHTML = '✗';
     }
@@ -1694,11 +1753,61 @@ function wireCopy() {
   });
 }
 
-function boot() {
+const DOCS_UTILITY_FN_URL = 'https://push.org/docs/chain/build/utility-functions/';
+
+// All text outside the result card (header, placeholders, the custom dropdown,
+// the footer) gets re-applied here — on boot, and again every time the
+// language switcher picks a new language, so nothing needs a page reload.
+function applyStaticI18n() {
+  const m = msg();
+  document.documentElement.lang = getLang();
+  document.title = m.docTitle;
+  el.metaDescription.content = m.docDescription;
+  el.logo.textContent = m.logo;
+  el.heroTitle.textContent = m.heroTitle;
+  el.heroLede.innerHTML = m.heroLedeHtml;
+  el.footerText.innerHTML = m.footerHtml(DOCS_UTILITY_FN_URL, DONUT.explorer);
+  el.address.setAttribute('aria-label', m.address.aria);
+  el.bubbleBtn.setAttribute('aria-label', m.search.aria);
+  wireRepoLink();
   buildChainOptions();
-  buildExamples();
+  buildNetworkDropdown();
+  onChainChange();
+  renderLangSwitch();
+  if (state) render();
+}
+
+function renderLangSwitch() {
+  el.langSwitch.innerHTML = LANGS.map(
+    (l) =>
+      `<button type="button" class="lang-btn${l === getLang() ? ' active' : ''}" data-lang="${l}" aria-pressed="${
+        l === getLang()
+      }">${LANG_CODE[l]}</button>`
+  ).join('');
+}
+
+function wireLangSwitch() {
+  el.langSwitch.addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLElement>('.lang-btn');
+    const lang = btn?.dataset.lang as Lang | undefined;
+    if (lang) {
+      setLang(lang);
+      applyStaticI18n();
+    }
+  });
+}
+
+function boot() {
+  onLangChange(() => {
+    const u = new URL(window.location.href);
+    u.searchParams.set('lang', getLang());
+    history.replaceState(null, '', u.toString());
+  });
   wireRepoLink();
   wireCopy();
+  wireNetworkDropdown();
+  wireLangSwitch();
+  applyStaticI18n();
   el.chain.addEventListener('change', onChainChange);
   el.form.addEventListener('submit', (e) => {
     e.preventDefault();

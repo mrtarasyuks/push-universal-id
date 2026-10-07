@@ -1,63 +1,53 @@
 <!doctype html>
-<html lang="uk">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Push Universal ID — хто ти на Push Chain</title>
+    <title>Push Universal ID</title>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <meta name="theme-color" content="#0d0b14" />
-    <meta
-      name="description"
-      content="Встав будь-яку адресу з будь-якого чейна — побач її Universal Executor Account (UEA) на Push Chain Donut: статус, баланс, газ, історію та застосунки. Read-only, без підключення гаманця."
-    />
-    <script type="module" crossorigin src="./assets/index-DnPFDK6A.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-gSAENLR8.css">
+    <meta id="meta-description" name="description" content="" />
+    <script type="module" crossorigin src="./assets/index-DXMirUAB.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-BlCUzUQN.css">
   </head>
   <body>
     <main class="wrap">
+      <div class="top-bar">
+        <div class="logo" id="logo"></div>
+        <div class="lang-switch" id="lang-switch" role="group" aria-label="Language"></div>
+      </div>
+
       <header class="hero">
-        <div class="logo">⚡ Push Universal ID</div>
-        <h1>Хто ти на Push&nbsp;Chain?</h1>
-        <p class="lede">
-          Встав адресу з будь-якого чейна (Ethereum, Base, Arbitrum, BNB, Solana) — і побач її
-          <strong>Universal Executor Account</strong> на Push&nbsp;Chain: чи задеплоєний, баланс,
-          газ, історію транзакцій і застосунки, з якими він взаємодіяв. Нічого не підписуєш,
-          гаманець не під'єднуєш — усе читається з публічного RPC та експлорера Donut-тестнету.
-        </p>
+        <h1 id="hero-title"></h1>
+        <p class="lede" id="hero-lede"></p>
       </header>
 
       <form id="lookup-form" class="lookup" autocomplete="off">
-        <div class="row">
-          <input
-            id="address"
-            type="text"
-            placeholder="0x… або Solana-адреса"
-            spellcheck="false"
-            aria-label="Адреса"
-          />
-          <select id="chain" aria-label="Origin-чейн"></select>
-          <button type="submit">Перевірити</button>
+        <div class="network-select" id="network-select">
+          <button type="button" class="network-trigger" id="network-trigger" aria-haspopup="listbox" aria-expanded="false">
+            <span class="network-icon" id="network-icon"></span>
+            <span class="network-label" id="network-label"></span>
+            <span class="network-arrow" aria-hidden="true">▾</span>
+          </button>
+          <ul class="network-list" id="network-list" role="listbox" hidden></ul>
         </div>
-        <div class="examples-wrap">
-          <span class="examples-label">Приклади:</span>
-          <div id="examples" class="examples"></div>
+        <select id="chain" hidden aria-hidden="true" tabindex="-1"></select>
+
+        <div class="search-row">
+          <input id="address" type="text" spellcheck="false" />
+          <button type="submit" class="bubble-btn" id="bubble-btn">
+            <span class="bubble-glow" aria-hidden="true"></span>
+            <span class="bubble-icon" aria-hidden="true">🔍</span>
+          </button>
         </div>
       </form>
 
       <p id="status" class="status" hidden></p>
+      <div id="flash" class="flash" aria-hidden="true"></div>
       <section id="result" class="result"></section>
 
       <footer class="foot">
-        <p>
-          Read-only інструмент на публічних даних Push Chain (Donut testnet, chain id 42101).
-          UEA обчислюється через офіційний
-          <a href="https://push.org/docs/chain/build/utility-functions/" target="_blank" rel="noopener"
-            >@pushchain/core</a
-          >, активність — через
-          <a href="https://donut.push.network/" target="_blank" rel="noopener">Blockscout API</a>.
-          Зроблено однією людиною з допомогою AI. Код:
-          <a id="repo-link" href="#" target="_blank" rel="noopener">GitHub</a>.
-        </p>
+        <p id="footer-text"></p>
       </footer>
     </main>
 

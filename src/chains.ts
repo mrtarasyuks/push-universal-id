@@ -18,68 +18,74 @@ export interface OriginChain {
   chain: CHAIN;
   label: string;
   vm: VmKind;
-  /** A real example address on this origin chain, one click away. */
-  example: string;
-  /** Short note shown under the example button. */
-  exampleNote: string;
+  /** Mini network-icon colours for the custom dropdown: a letter on a flat or
+   * gradient circle — no external images, just inline SVG. */
+  icon: { letter: string; from: string; to?: string };
 }
 
 // Only origin chains that Push maps to the Donut testnet are offered here.
-// The EVM example addresses are real origin wallets whose UEADeployed event is
-// on Donut (so they have a deployed, active UEA) — verified from the factory's
-// logs. Where no verified-active example exists for a chain, we reuse a real
-// owner address; the tool then shows the honest "no UEA activity yet" state,
-// which is itself a valid answer.
 export const ORIGIN_CHAINS: OriginChain[] = [
   {
     id: 'eth-sepolia',
     chain: CHAIN.ETHEREUM_SEPOLIA,
     label: 'Ethereum Sepolia',
     vm: 'evm',
-    example: '0xdcffb983a2d59f45718afdf5029efcf30a7c85a6',
-    exampleNote: 'реальний власник з активним UEA на Donut',
+    icon: { letter: 'E', from: '#627eea', to: '#8da3f7' },
   },
   {
     id: 'bnb-testnet',
     chain: CHAIN.BNB_TESTNET,
     label: 'BNB Smart Chain testnet',
     vm: 'evm',
-    example: '0x9cfa6f508dfe4d72e335183abd0fc562b7ac8a50',
-    exampleNote: 'реальний власник з активним UEA на Donut',
+    icon: { letter: 'B', from: '#f0b90b', to: '#f8d12f' },
   },
   {
     id: 'base-sepolia',
     chain: CHAIN.BASE_SEPOLIA,
     label: 'Base Sepolia',
     vm: 'evm',
-    example: '0xdcffb983a2d59f45718afdf5029efcf30a7c85a6',
-    exampleNote: 'той самий власник, інший origin-чейн',
+    icon: { letter: 'b', from: '#0052ff', to: '#3b7bff' },
   },
   {
     id: 'arbitrum-sepolia',
     chain: CHAIN.ARBITRUM_SEPOLIA,
     label: 'Arbitrum Sepolia',
     vm: 'evm',
-    example: '0x9cfa6f508dfe4d72e335183abd0fc562b7ac8a50',
-    exampleNote: 'той самий власник, інший origin-чейн',
+    icon: { letter: 'A', from: '#28a0f0', to: '#1b4add' },
   },
   {
     id: 'push',
     chain: CHAIN.PUSH_TESTNET_DONUT,
     label: 'Push Chain (Donut, native)',
     vm: 'evm',
-    example: '0x99Ea0aC8f7F7CbBBaf7ca61644Eef591d290ca4B',
-    exampleNote: 'адреса вже на Push Chain — UEA це вона сама',
+    icon: { letter: 'P', from: '#d548ec', to: '#8b5cf6' },
   },
   {
     id: 'solana-devnet',
     chain: CHAIN.SOLANA_DEVNET,
     label: 'Solana Devnet',
     vm: 'svm',
-    example: '11111111111111111111111111111111',
-    exampleNote: 'приклад Solana-адреси (base58, 32 байти)',
+    icon: { letter: 'S', from: '#9945ff', to: '#14f195' },
   },
 ];
+
+let iconGradientSeq = 0;
+
+/** A small inline-SVG circle with a letter — the dropdown's network icon. No
+ * external images, so it works offline and needs no extra request. */
+export function chainIconSvg(icon: { letter: string; from: string; to?: string }): string {
+  const id = `ni-${iconGradientSeq++}`;
+  const fill = icon.to ? `url(#${id})` : icon.from;
+  const defs = icon.to
+    ? `<defs><linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${icon.from}"/><stop offset="1" stop-color="${icon.to}"/></linearGradient></defs>`
+    : '';
+  return `<svg class="network-icon-svg" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">${defs}<circle cx="10" cy="10" r="10" fill="${fill}"/><text x="10" y="14" text-anchor="middle" font-size="10" font-weight="700" font-family="ui-sans-serif,system-ui" fill="#fff">${icon.letter}</text></svg>`;
+}
+
+/** Neutral icon for the "this is a UEA, find its origin" reverse-lookup row. */
+export function reverseIconSvg(): string {
+  return `<svg class="network-icon-svg" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><circle cx="10" cy="10" r="10" fill="#352447"/><text x="10" y="14" text-anchor="middle" font-size="10" font-family="ui-sans-serif,system-ui" fill="#d548ec">↩</text></svg>`;
+}
 
 export function findChain(id: string | null): OriginChain | undefined {
   if (!id) return undefined;

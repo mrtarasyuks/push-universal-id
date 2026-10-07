@@ -28,82 +28,158 @@ body {
 
 .wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 64px; }
 
-.hero { text-align: center; margin-bottom: 28px; }
+.top-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
 .logo {
-  display: inline-block;
   font-weight: 700;
   letter-spacing: 0.02em;
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  margin-bottom: 10px;
 }
+
+.lang-switch { display: flex; gap: 4px; background: var(--card-2); border: 1px solid var(--line); border-radius: 999px; padding: 3px; }
+.lang-btn {
+  border: none; background: transparent; color: var(--muted);
+  font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
+  padding: 5px 10px; border-radius: 999px; cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.lang-btn:hover { color: var(--text); }
+.lang-btn.active { background: linear-gradient(90deg, var(--accent), var(--accent-2)); color: #fff; }
+
+.hero { text-align: center; margin-bottom: 28px; }
 .hero h1 { font-size: clamp(24px, 6vw, 46px); margin: 6px 0 14px; letter-spacing: -0.02em; overflow-wrap: break-word; }
 .lede { color: var(--muted); max-width: 640px; margin: 0 auto; font-size: 16px; }
 .lede strong { color: var(--text); }
 
 .lookup {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 16px;
-  margin-bottom: 20px;
-}
-.row { display: flex; gap: 10px; flex-wrap: wrap; }
-#address {
-  flex: 1 1 320px;
-  min-width: 0;
-  padding: 12px 14px;
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  color: var(--text);
-  font-size: 15px;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-}
-#address:focus, #chain:focus { outline: 2px solid var(--accent-2); border-color: transparent; }
-#chain {
-  padding: 12px 14px;
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  color: var(--text);
-  font-size: 15px;
-}
-button[type="submit"] {
-  padding: 12px 22px;
-  border: none;
-  border-radius: 10px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  color: #fff;
-  font-weight: 600;
-  font-size: 15px;
-  cursor: pointer;
-}
-button[type="submit"]:hover { filter: brightness(1.08); }
-
-.examples-wrap { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
-.examples-label { color: var(--muted); font-size: 13px; }
-.examples { display: flex; gap: 8px; flex-wrap: wrap; }
-.example {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  padding: 6px 10px;
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  cursor: pointer;
-  color: var(--text);
-  text-align: left;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
 }
-.example:hover { border-color: var(--accent-2); }
-.example-chain { font-size: 12px; color: var(--muted); }
-.example-addr { font-size: 12px; font-family: ui-monospace, monospace; }
 
-.status { padding: 12px 16px; border-radius: 10px; font-size: 14px; margin: 0 0 16px; }
+/* ---- custom network dropdown ---- */
+.network-select { position: relative; width: 100%; max-width: 320px; }
+.network-trigger {
+  width: 100%;
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.network-trigger:hover, .network-trigger:focus-visible { border-color: var(--accent-2); outline: none; }
+.network-icon,
+.network-icon-svg { display: flex; flex: 0 0 auto; }
+.network-label { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.network-arrow { color: var(--muted); font-size: 12px; transition: transform 0.15s ease; }
+.network-trigger[aria-expanded="true"] .network-arrow { transform: rotate(180deg); }
+.network-list {
+  position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; right: 0;
+  margin: 0; padding: 6px; list-style: none;
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.6);
+  max-height: 320px; overflow-y: auto;
+}
+.network-option {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 10px; border-radius: 9px; cursor: pointer; font-size: 14px;
+  outline: none;
+}
+.network-option:hover, .network-option:focus { background: var(--card-2); }
+.network-option[aria-selected="true"] { background: rgba(213, 72, 236, 0.14); color: var(--accent); }
+.network-option-reverse { border-top: 1px dashed var(--line); margin-top: 4px; padding-top: 12px; }
+
+/* ---- single address input + round bubble search button ---- */
+.search-row { display: flex; align-items: center; justify-content: center; gap: 14px; width: 100%; max-width: 480px; transition: transform 0.05s ease; }
+#address {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 14px 18px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  color: var(--text);
+  font-size: 15px;
+  text-align: center;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+#address:focus { outline: 2px solid var(--accent-2); border-color: transparent; }
+
+.bubble-btn {
+  position: relative;
+  flex: 0 0 auto;
+  width: 60px; height: 60px;
+  border: none; border-radius: 50%;
+  background: radial-gradient(circle at 32% 28%, #ffffff55, transparent 42%),
+    linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+  font-size: 22px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 8px 26px -8px rgba(213, 72, 236, 0.6);
+  animation: bubbleBreathe 3.2s ease-in-out infinite;
+  transition: transform 0.15s ease, box-shadow 0.2s ease;
+}
+.bubble-btn:hover { box-shadow: 0 10px 30px -6px rgba(213, 72, 236, 0.75), 0 0 20px -2px rgba(139, 92, 246, 0.6); }
+.bubble-btn:active { transform: scale(0.94); }
+.bubble-icon { position: relative; z-index: 1; }
+.bubble-glow {
+  position: absolute; inset: -6px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(213, 72, 236, 0.35), transparent 70%);
+  opacity: 0; transition: opacity 0.2s ease;
+}
+.bubble-btn:hover .bubble-glow { opacity: 1; }
+.bubble-btn.popping { animation: bubblePop 0.5s ease; }
+.bubble-ring {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 2px solid var(--accent-2);
+  animation: bubbleRing 0.65s ease-out forwards;
+  pointer-events: none;
+}
+@keyframes bubbleBreathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.045); }
+}
+@keyframes bubblePop {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.22); }
+  60% { transform: scale(0.92); }
+  100% { transform: scale(1); }
+}
+@keyframes bubbleRing {
+  0% { opacity: 0.6; transform: scale(1); }
+  100% { opacity: 0; transform: scale(2.1); }
+}
+/* a thin shake on the search row while the lookup is loading */
+.search-row.shaking { animation: rowShake 0.42s ease-in-out infinite; }
+@keyframes rowShake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-3px); }
+  75% { transform: translateX(3px); }
+}
+
+/* a soft flash across the page right before the result appears */
+.flash {
+  position: fixed; inset: 0; z-index: 50; pointer-events: none;
+  background: radial-gradient(circle at 50% 30%, rgba(213, 72, 236, 0.22), transparent 60%);
+  opacity: 0;
+}
+.flash.flashing { animation: flashPulse 0.65s ease-out; }
+@keyframes flashPulse {
+  0% { opacity: 0; }
+  30% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.status { padding: 12px 16px; border-radius: 10px; font-size: 14px; margin: 0 0 16px; text-align: center; }
 .status-info { background: #241a36; color: var(--muted); }
 .status-error { background: #3a1620; color: var(--err); border: 1px solid #5a2030; }
 .status-muted { display: none; }
@@ -150,6 +226,21 @@ button[type="submit"]:hover { filter: brightness(1.08); }
 .metric-value { font-size: 22px; font-weight: 700; }
 .metric-value .unit { font-size: 13px; color: var(--muted); font-weight: 500; }
 .metric-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.metric-rank { border-color: rgba(213, 72, 236, 0.4); }
+.metric-value.metric-rank-value {
+  font-size: 17px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* a wrapping label (e.g. two-word ranks) must not use the number tiles'
+     gradient text-clip — a left-to-right gradient looks broken once the text
+     wraps onto a second line, so this tile stays a plain solid colour. The
+     double class selector outweighs the later single-class gradient rule. */
+  background: none;
+  -webkit-background-clip: initial;
+  background-clip: initial;
+  color: var(--text);
+}
 
 .block { margin-top: 20px; }
 .block h3 { font-size: 15px; margin: 0 0 10px; }
@@ -217,9 +308,6 @@ button[type="submit"]:hover { filter: brightness(1.08); }
 .hint-warn { color: var(--pending); }
 
 .map-muted { color: var(--muted) !important; }
-
-.example-reverse { border-color: var(--accent-2) !important; }
-.example-reverse .example-chain { color: var(--accent-2); }
 
 .loadmore { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .load-btn {
@@ -349,25 +437,22 @@ button[type="submit"]:hover { filter: brightness(1.08); }
 /* ---- final polish: buttons, motion, loading skeleton, verdict, count-up ---- */
 
 /* unified button language: primary = gradient with a glow on hover,
-   secondary = outline. All share the same hover/active/disabled motion. */
-button[type="submit"],
+   secondary = outline. All share the same hover/active/disabled motion.
+   (The round search bubble has its own dedicated motion, above.) */
 .load-btn:not(.secondary):not(.ghost) {
   transition: transform 0.15s ease, box-shadow 0.2s ease, filter 0.15s ease, opacity 0.15s ease;
   box-shadow: 0 0 0 0 rgba(213, 72, 236, 0);
 }
-button[type="submit"]:hover:not(:disabled),
 .load-btn:not(.secondary):not(.ghost):hover:not(:disabled) {
   filter: brightness(1.1);
   box-shadow: 0 8px 26px -6px rgba(213, 72, 236, 0.55), 0 0 18px -4px rgba(139, 92, 246, 0.5);
   transform: translateY(-1px);
 }
-button[type="submit"]:active:not(:disabled),
 .load-btn:not(.secondary):not(.ghost):active:not(:disabled) {
   transform: translateY(0) scale(0.98);
   filter: brightness(0.96);
   box-shadow: none;
 }
-button[type="submit"]:disabled,
 .load-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -378,21 +463,18 @@ button[type="submit"]:disabled,
 
 .load-btn.secondary,
 .load-btn.ghost,
-.example,
 .copy-btn {
   transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, transform 0.15s ease,
     box-shadow 0.15s ease;
 }
 .load-btn.secondary:hover:not(:disabled),
 .load-btn.ghost:hover:not(:disabled),
-.example:hover,
 .copy-btn:hover {
   transform: translateY(-1px);
   box-shadow: 0 4px 14px -6px rgba(0, 0, 0, 0.5);
 }
 .load-btn.secondary:active:not(:disabled),
 .load-btn.ghost:active:not(:disabled),
-.example:active,
 .copy-btn:active {
   transform: translateY(0);
   box-shadow: none;
@@ -515,15 +597,11 @@ button[type="submit"]:disabled,
 
 @media (max-width: 560px) {
   .verdict-top { align-items: flex-start; }
-  /* flex: 1 1 320px on #address is a width basis for the row layout; reset it
-     here so switching to a column layout cannot turn it into a 320px height.
-     #address/#chain are ID selectors, so the reset needs equal specificity —
-     a plain ".row > *" loses to "#address" regardless of source order. */
-  .row { flex-direction: column; align-items: stretch; }
-  .row > * { flex: 0 0 auto; width: 100%; }
-  .row #address,
-  .row #chain,
-  .row button[type="submit"] { flex: 0 0 auto; width: 100%; }
+  .top-bar { flex-wrap: wrap; gap: 8px; }
+  .network-select,
+  .search-row { max-width: 100%; }
+  #address { font-size: 14px; padding: 12px 14px; }
+  .bubble-btn { width: 52px; height: 52px; font-size: 19px; }
 }
 
 /* relayers: folded by default — an active account has hundreds of them */

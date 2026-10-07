@@ -1,5 +1,6 @@
 // Small formatting helpers. All on-chain amounts are integer wei strings, so we
 // format them by hand to avoid float rounding.
+import { agoText, durationText } from './i18n';
 
 export function shortAddr(addr: string, head = 6, tail = 4): string {
   if (!addr) return '';
@@ -55,32 +56,17 @@ export function timeAgo(iso: string | null | undefined): string {
   if (Number.isNaN(then)) return '—';
   const diff = Date.now() - then;
   const s = Math.floor(diff / 1000);
-  if (s < 60) return `${s} с тому`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} хв тому`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h} год тому`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d} дн тому`;
-  return new Date(iso).toISOString().slice(0, 10);
+  if (s >= 30 * 24 * 3600) return new Date(iso).toISOString().slice(0, 10);
+  return agoText(s);
 }
 
 export function nowUtc(): string {
   return new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
 }
 
-/** A short human duration in Ukrainian from a count of seconds (for the bridge
- * time between the Push-side send and the destination-chain settlement). */
+/** A short human duration in the current language from a count of seconds (for
+ * the bridge time between the Push-side send and the destination-chain
+ * settlement). */
 export function formatDuration(seconds: number): string {
-  const s = Math.max(0, Math.round(seconds));
-  if (s < 60) return `${s} с`;
-  const m = Math.floor(s / 60);
-  const rem = s % 60;
-  if (m < 60) return rem ? `${m} хв ${rem} с` : `${m} хв`;
-  const h = Math.floor(m / 60);
-  const mm = m % 60;
-  if (h < 24) return mm ? `${h} год ${mm} хв` : `${h} год`;
-  const d = Math.floor(h / 24);
-  const hh = h % 24;
-  return hh ? `${d} дн ${hh} год` : `${d} дн`;
+  return durationText(seconds);
 }

@@ -45,6 +45,9 @@ It is a **read-only** static site. There is **no wallet connect, no signing, no
 transactions, no backend, and no API keys** — everything is computed in your browser from
 public data. Nothing to approve, nothing to trust with your keys.
 
+The interface is available in **English, French, Spanish and Ukrainian** (switcher in the
+header; remembered in `localStorage`, or set directly with `?lang=fr`).
+
 Live example (ETH Sepolia origin with an active UEA):
 `?address=0xdcffb983a2d59f45718afdf5029efcf30a7c85a6&chain=eth-sepolia`
 
@@ -72,8 +75,8 @@ tool shows.
 
 ## The flow
 
-1. Enter an address (or click an example) and pick its origin chain — **or** pick
-   “↩︎ Це UEA на Push Chain” to go the other way and paste a UEA directly.
+1. Pick an origin chain from the network dropdown — **or** pick “↩︎ This is a UEA on
+   Push Chain” to go the other way — and paste an address.
 2. Forward: the UEA is derived **offchain** (`CREATE2`), identical to the algorithm in
    [`@pushchain/core`](https://push.org/docs/chain/build/utility-functions/).
    Reverse: the origin is read from the factory’s `getOriginForUEA` (authoritative, not a guess).

@@ -11,6 +11,7 @@ import {
 } from 'viem';
 import bs58 from 'bs58';
 import { ethCall } from './blockscout';
+import { msg } from './i18n';
 // We lean on the SDK's own authoritative constants (namespaces, chain ids, the
 // UEA factory + proxy addresses) so this tool stays correct if Push updates
 // them — but we deliberately deep-import only the constant modules, not the
@@ -71,7 +72,7 @@ function buildAccountId(chain: CHAIN, address: string): AccountId {
     owner = getAddress(address); // validates + checksums; throws if malformed
   } else {
     const bytes = Uint8Array.from(bs58.decode(address));
-    if (bytes.length !== 32) throw new Error('Невалідна Solana-адреса (очікується 32 байти).');
+    if (bytes.length !== 32) throw new Error(msg().errInvalidSolanaAddress);
     owner = bytesToHex(bytes);
   }
   return { chainNamespace: namespace, chainId, owner };

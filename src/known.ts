@@ -100,7 +100,7 @@ function add(addr: string | undefined, entry: KnownAddr) {
 }
 
 // infra / precompiles
-add(GATEWAY_PC, { name: 'UniversalGatewayPC (шлюз)', kind: 'infra' });
+add(GATEWAY_PC, { name: 'UniversalGatewayPC', kind: 'infra' });
 add(UNIVERSAL_CORE, { name: 'UniversalCore', kind: 'infra' });
 add(UNIVERSAL_CALLBACK, { name: 'UniversalCallback', kind: 'infra' });
 add(UEA_FACTORY, { name: 'UEAFactory', kind: 'infra' });
