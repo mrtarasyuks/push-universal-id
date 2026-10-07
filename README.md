@@ -23,14 +23,17 @@ the **exact destination chain** the universal call was routed to (and the recipi
 it), rather than inferring the chain from the bridged token. A ✓ next to a destination means it
 was confirmed from that event. For each cross-chain action it also shows the **method it invokes
 on the destination contract** — decoded from the outbound `payload` down to its **arguments**
-(recipient and amount for the standard `transfer` / `approve` / `transferFrom` calls), so you see
-*what* the call does on the far side, not just its selector — and a **delivery status**. The
-status is **confirmed on the destination chain itself**: the tool queries that chain's own public
-RPC (from the SDK) for its gateway/vault `UniversalTxExecuted` / `UniversalTxFinalized` event
-carrying the **same `subTxId`**, and shows **✓ delivered** (or **✗ rejected** on a
-`UniversalTxReverted` / `FundsRescued`). When the destination RPC can't be reached from the
-browser it falls back to the Push-side signal (**sent** / **returned (rescue)** / **not
-executed**). Each action also carries a direct **link to the destination chain's own explorer**
+(recipient and amount for the standard `transfer` / `approve` / `transferFrom` calls — and, for a
+batched call like a router `multicall` or a UEA multicall, the **inner method names** so a swap
+reads as `exactInputSingle` rather than a bare selector), so you see *what* the call does on the far
+side — and a **delivery status**. The status is **confirmed on the destination chain itself**: the
+tool reads that chain's own **Blockscout API** (`/addresses/{contract}/logs?topic=<subTxId>`, which
+is CORS-friendly and doesn't cap the log range) for its gateway/vault `UniversalTxExecuted` /
+`UniversalTxFinalized` event carrying the **same `subTxId`**, and shows **✓ delivered** (with the
+**bridge time** — how long the hop took from the Push-side send to the destination settlement) or
+**✗ rejected** on a `UniversalTxReverted` / `FundsRescued`. When the destination chain has no
+CORS-friendly Blockscout the tool falls back to the Push-side signal (**sent** / **returned
+(rescue)** / **not executed**). Each action also carries a direct **link to the destination chain's own explorer**
 (Arbiscan / Basescan / Etherscan / BscScan / Solana Explorer) — to the actual settling transaction
 when delivery is confirmed, otherwise to the recipient — so you can see the end of the bridge, not
 just the Push side. Actions are **grouped per app**, so you see at a
@@ -122,19 +125,29 @@ tool shows.
   the token-derived chain and says so.
 - **Destination method + arguments** — the `UniversalTxOutbound` event's `payload` is the calldata
   the action runs on the destination contract. The tool decodes its 4-byte selector (named for the
-  known selectors) and, for the standard ERC-20 calls whose layout is fixed (`transfer`, `approve`,
-  `transferFrom`), the **recipient and amount** too — so you see *what exactly* the cross-chain call
-  does on the far side (e.g. "approve · spender 0x… · ∞ pETH"), not just a selector. It never
-  guesses arguments for a method whose layout it does not know; an empty payload is a plain transfer.
+  known ERC-20 and DEX/router/wrapper selectors, each computed from its signature with
+  `toFunctionSelector`, never guessed) and, for the standard ERC-20 calls whose layout is fixed
+  (`transfer`, `approve`, `transferFrom`), the **recipient and amount** too. For a **batched call**
+  (a router `multicall(bytes[])` or a UEA multicall) it decodes the **inner method names**, so a
+  swap reads as "multicall: approve → exactInputSingle" instead of a bare selector — you see *what
+  exactly* the cross-chain call does on the far side. It never guesses arguments for a method whose
+  layout it does not know; an empty payload is a plain transfer.
 - **Delivery confirmed on the destination chain** — the authoritative "it arrived" lives on the
   destination chain, where its gateway/vault emit `UniversalTxExecuted` / `UniversalTxFinalized`
   (arrived) or `UniversalTxReverted` / `FundsRescued` (bounced), each carrying the **same `subTxId`**
-  as the Push-side outbound. The tool queries that chain's own public RPC (from the SDK's
-  `CHAIN_INFO`) with `eth_getLogs` filtered by those event signatures **and** the exact `subTxId`,
-  and shows **✓ delivered on \<chain\>** or **✗ rejected on \<chain\>** — authoritative, by shared
-  id. This is best-effort: when the destination RPC is unreachable or blocks CORS from the browser,
-  the action simply stays on its Push-side status instead of a confirmation (never a made-up one).
-  The destination-event ABIs are copied verbatim from `@pushchain/core`'s universal-tx-detector.
+  as the Push-side outbound. The tool reads that chain's own **Blockscout API**
+  (`/addresses/{contract}/logs?topic=<subTxId>`) rather than its raw public RPC: Blockscout is
+  CORS-friendly and doesn't cap the log range the way the raw testnet RPCs do (which usually block
+  CORS or error out), so the confirmation actually appears. It classifies by the event name
+  Blockscout itself decodes (the deployed `UniversalTxFinalized` carries an extra indexed field the
+  SDK ABI doesn't, so a hardcoded topic0 would silently never match), and shows **✓ delivered on
+  \<chain\>** or **✗ rejected on \<chain\>** — authoritative, by shared id. Verified CORS-friendly
+  Blockscout destinations: **Ethereum Sepolia** and **Base Sepolia**. This is best-effort: for a
+  chain without one (e.g. Arbitrum Sepolia's Blockscout sits behind a bot-challenge), the action
+  stays on its Push-side status instead of a confirmation (never a made-up one).
+- **Bridge time** — when a delivery is confirmed, the tool shows **how long the hop took**: the
+  difference between the Push-side `executeUniversalTx` block time and the destination settlement
+  log's block time (both from Blockscout). Shown only when both timestamps are known.
 - **Cross-chain status (Push-side fallback)** — the Push gateway emits `RescueFundsOnSourceChain`
   when a delivery fails and the bridged funds are returned to the UEA on Push. That event indexes
   the action's **`universalTxId`** (`sha256("eip155:42101:<pushTxHash>")`, the chain's
@@ -181,13 +194,17 @@ The static site is built into `docs/` so GitHub Pages can serve it as-is.
   back to the chain the bridged synthetic PRC-20 token maps to (and says so). The destination
   **contract** is the raw `recipient` from the gateway call. Bridged amounts use each token's real
   decimals when the explorer has reported them, else default to 18.
-- Cross-chain **delivery** is confirmed on the destination chain itself when its public RPC can be
-  read from the browser: a settlement event there (`UniversalTxExecuted` / `UniversalTxFinalized`
-  → delivered, `UniversalTxReverted` / `FundsRescued` → rejected) with the **same `subTxId`** is
-  authoritative. This is best-effort — many public testnet RPCs block CORS or cap `eth_getLogs`
-  ranges from a browser, and then no confirmation is shown; the tool never fabricates one. When the
-  destination is not confirmed it falls back to Push-side signals (sent / returned-rescue /
-  reverted-on-Push). A **rescue** is now bound to the **exact action** by its `universalTxId`
+- Cross-chain **delivery** is confirmed on the destination chain's own **Blockscout API** (not its
+  raw RPC): a settlement event there (`UniversalTxExecuted` / `UniversalTxFinalized` → delivered,
+  `UniversalTxReverted` / `FundsRescued` → rejected) carrying the **same `subTxId`** is
+  authoritative. This is best-effort and only for chains with a verified CORS-friendly Blockscout
+  (Ethereum Sepolia, Base Sepolia); for others (e.g. Arbitrum Sepolia, behind a bot-challenge) no
+  confirmation is shown and the tool never fabricates one. Base Sepolia's log list omits the
+  settling tx hash, so there the "end of bridge" link points at the recipient address rather than
+  the tx. When the destination is not confirmed it falls back to Push-side signals (sent /
+  returned-rescue / reverted-on-Push). The **bridge time** on a confirmed delivery is the gap
+  between the Push `executeUniversalTx` block and the destination settlement block. A **rescue** is
+  bound to the **exact action** by its `universalTxId`
   (`sha256("eip155:42101:<pushTxHash>")`, the chain's `GetPcUniversalTxKey`, which the gateway's
   `RescueFundsOnSourceChain` indexes), narrowed by token + chain — not merely by direction.
 - "Gas paid by the UEA" counts only the UEA's own outgoing transactions; most UEAs are

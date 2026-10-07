@@ -4,7 +4,7 @@ import {
   findChainByCaip,
   chainLabelFromNamespace,
   destExplorerUrl,
-  destConfig,
+  destBlockscout,
   REVERSE_ID,
   DONUT,
   donutAddressUrl,
@@ -18,32 +18,29 @@ import {
   getTokenTransfers,
   getTokenBalances,
   getLogs,
-  rpcGetLogs,
+  getDestSettlementLogs,
   isNotFound,
   type Tx,
   type TokenTransfer,
   type TokenBalance,
   type PageParams,
-  type RpcLog,
 } from './blockscout';
 import {
   decodeUniversalAction,
   decodeOutboundEvent,
   decodeRescueEvent,
-  decodeDeliveryLog,
+  classifyDelivery,
   pcUniversalTxId,
   selectorLabel,
   OUTBOUND_EVENT_TOPIC0,
   RESCUE_EVENT_TOPIC0,
-  DEST_EVENT_TOPICS,
   type UniversalAction,
   type InnerCall,
   type OutboundEvent,
   type RescueEvent,
-  type DeliveryLog,
 } from './actions';
 import { knownAddr, isInfra, tokenMeta, GATEWAY_PC_ADDRESS } from './known';
-import { shortAddr, formatUnits, formatInt, sumGasWei, timeAgo, nowUtc } from './format';
+import { shortAddr, formatUnits, formatInt, sumGasWei, timeAgo, nowUtc, formatDuration } from './format';
 import { getAddress } from 'viem';
 import './style.css';
 
@@ -206,10 +203,10 @@ interface LookupState {
   rescueKeys: Set<string>;
   // Destination-chain delivery confirmation, keyed by a cross-chain sub-tx's
   // subTxId. Present only when positively confirmed from the destination chain's
-  // own RPC (its UniversalTxExecuted/Finalized → delivered, Reverted/Rescued →
-  // bounced); absent means "not confirmed from the destination" (still in flight,
-  // or that chain's RPC was unreachable / blocked CORS). `deliveryChecked` tracks
-  // subTxIds already queried so we never re-query one.
+  // own Blockscout (its UniversalTxExecuted/Finalized → delivered, Reverted/Rescued
+  // → bounced); absent means "not confirmed from the destination" (still in flight,
+  // or that chain has no CORS-friendly Blockscout we can read). `deliveryChecked`
+  // tracks subTxIds already queried so we never re-query one.
   delivery: Map<string, DeliveryStatus>;
   deliveryChecked: Set<string>;
   deliveryActive: boolean; // a background confirmation pass is running
@@ -224,9 +221,12 @@ interface LookupState {
 /** A confirmed destination-chain outcome for one cross-chain sub-tx. */
 interface DeliveryStatus {
   ok: boolean; // true = arrived (Executed/Finalized), false = bounced (Reverted/Rescued)
-  destTxHash: string; // the settling tx hash on the destination chain
+  destTxHash: string | null; // the settling tx hash on the destination chain, when given
   destTxUrl: string | null; // link to that tx on the destination chain's explorer
   chainLabel: string;
+  // Bridge time: seconds between the Push-side outbound and the destination-chain
+  // settlement, when both block timestamps are known. null otherwise.
+  bridgeSeconds: number | null;
 }
 
 let state: LookupState | null = null;
@@ -597,10 +597,11 @@ async function doResolveOutbound(): Promise<void> {
 // arrived" is on the destination chain: its UniversalGateway/Vault emit
 // UniversalTxExecuted / UniversalTxFinalized (arrived) or UniversalTxReverted /
 // FundsRescued (bounced), each carrying the SAME subTxId as our Push-side
-// outbound event. We confirm a sub-tx by querying the destination chain's own
-// public RPC (from the SDK) for a log with that subTxId — best-effort: if that
-// chain's RPC is unreachable or blocks CORS from the browser, the sub-tx simply
-// stays "not confirmed from destination" and we keep the honest Push-side signal.
+// outbound event. We confirm a sub-tx by reading the destination chain's own
+// Blockscout (`/addresses/{contract}/logs?topic=<subTxId>`) rather than its raw
+// public RPC: Blockscout is CORS-friendly and does not cap the log range the way
+// the raw RPCs do, so "✓ доставлено" actually shows up. Best-effort — a chain with
+// no CORS-friendly Blockscout stays "not confirmed" and keeps the Push-side signal.
 const DELIVERY_CAP = 24; // bound the external calls a single lookup makes
 const ZERO_BYTES32 = '0x' + '0'.repeat(64);
 
@@ -630,53 +631,68 @@ async function confirmDeliveries(): Promise<void> {
   const m = state;
   if (!m) return;
 
+  // Push-side send time per tx hash, so we can measure the bridge delay.
+  const pushTs = new Map<string, string>();
+  for (const tx of m.txs) {
+    if (tx.timestamp) pushTs.set(tx.hash.toLowerCase(), tx.timestamp);
+  }
+
   // Distinct, not-yet-checked cross-chain sub-txs, with the destination chain the
-  // gateway event named. An outbound event only exists for a successful send, so
-  // its presence already means "sent" — we need only its destination fate.
-  const targets: { subTxId: string; caip: string }[] = [];
+  // gateway event named and the Push-side send time. An outbound event only exists
+  // for a successful send, so its presence already means "sent" — we need only its
+  // destination fate.
+  const targets: { subTxId: string; caip: string; sentIso: string | null }[] = [];
   for (const arr of m.outbound.values()) {
     for (const ev of arr) {
       const sid = ev.subTxId?.toLowerCase();
       if (!sid || sid === ZERO_BYTES32) continue;
       if (m.deliveryChecked.has(sid) || m.delivery.has(sid)) continue;
       if (targets.some((t) => t.subTxId === sid)) continue;
-      targets.push({ subTxId: sid, caip: ev.chainNamespace });
+      targets.push({ subTxId: sid, caip: ev.chainNamespace, sentIso: pushTs.get(ev.txHash.toLowerCase()) ?? null });
     }
   }
   if (!targets.length) return;
 
   for (const t of targets.slice(0, DELIVERY_CAP)) {
     if (state !== m) return; // a newer lookup replaced us
-    const cfg = destConfig(t.caip);
+    const dst = destBlockscout(t.caip);
     m.deliveryChecked.add(t.subTxId); // do not re-query, success or not
-    if (!cfg) continue; // non-EVM / unknown chain — cannot read via eth_getLogs
+    if (!dst) continue; // no CORS-friendly Blockscout for this chain — keep Push signal
 
-    // Filter by the settlement-event signatures (topic0 OR-set) AND the exact
-    // subTxId (topic1): a normal EVM node does this positional AND for us. Try
-    // each public RPC until one actually answers (null = could not query).
-    let logs: RpcLog[] | null = null;
-    for (const url of cfg.rpcUrls) {
-      logs = await rpcGetLogs(url, {
-        address: cfg.contracts,
-        topics: [DEST_EVENT_TOPICS, t.subTxId],
-      });
-      if (logs !== null) break;
-    }
-    if (!logs || !logs.length) continue; // unreachable, or nothing settled yet
-
-    let chosen: DeliveryLog | null = null;
-    for (const lg of logs) {
-      const d = decodeDeliveryLog(lg);
-      if (!d || d.subTxId !== t.subTxId) continue;
-      // A success (Executed/Finalized) is the terminal truth; prefer it.
-      if (!chosen || (d.ok && !chosen.ok)) chosen = d;
+    // Read the destination Blockscout for a settlement log carrying this subTxId
+    // (an indexed topic). Blockscout decodes the event itself, so we classify by
+    // its name rather than a hardcoded topic0. Query each settling contract (vault,
+    // then gateway) until one returns a classifiable log.
+    let chosen: { ok: boolean; txHash: string | null; iso: string | null } | null = null;
+    for (const contract of dst.contracts) {
+      if (state !== m) return;
+      const logs = await getDestSettlementLogs(dst.base, contract, t.subTxId);
+      if (logs === null) continue; // could not query this contract
+      for (const lg of logs) {
+        const cls = classifyDelivery(lg.eventName);
+        if (!cls) continue;
+        // A success (Executed/Finalized) is the terminal truth; prefer it.
+        if (!chosen || (cls === 'ok' && !chosen.ok)) {
+          chosen = { ok: cls === 'ok', txHash: lg.txHash, iso: lg.timestamp };
+        }
+      }
+      if (chosen?.ok) break; // confirmed arrived — no need to check the other contract
     }
     if (chosen) {
+      let bridgeSeconds: number | null = null;
+      if (t.sentIso && chosen.iso) {
+        const sent = new Date(t.sentIso).getTime();
+        const settled = new Date(chosen.iso).getTime();
+        if (!Number.isNaN(sent) && !Number.isNaN(settled) && settled >= sent) {
+          bridgeSeconds = (settled - sent) / 1000;
+        }
+      }
       m.delivery.set(t.subTxId, {
         ok: chosen.ok,
-        destTxHash: chosen.destTxHash,
-        destTxUrl: cfg.explorerTxUrl(chosen.destTxHash),
-        chainLabel: cfg.label,
+        destTxHash: chosen.txHash,
+        destTxUrl: chosen.txHash ? dst.txUrl(chosen.txHash) : null,
+        chainLabel: dst.label,
+        bridgeSeconds,
       });
     }
   }
@@ -1000,7 +1016,7 @@ function render() {
   const actionsHtml = actions.length
     ? `<section class="block">
         <h3>Універсальні дії <span class="count-badge">${actions.length}</span></h3>
-        <p class="hint">Декодовано з <code>executeUniversalTx</code> — справжній цільовий застосунок кожної дії, а не релеєр. Крос-чейн дії через шлюз показують чейн, метод і аргументи виклику на призначенні, статус доставки та пряме посилання на експлорер чейна-призначення («кінець мосту»). Доставку <strong>підтверджуємо на самому чейні призначення</strong> (його RPC із SDK): подія <code>UniversalTxExecuted/Finalized</code> з тим самим <code>subTxId</code> = ✓ доставлено.${
+        <p class="hint">Декодовано з <code>executeUniversalTx</code> — справжній цільовий застосунок кожної дії, а не релеєр. Крос-чейн дії через шлюз показують чейн, метод і аргументи виклику на призначенні, статус доставки та пряме посилання на експлорер чейна-призначення («кінець мосту»). Доставку <strong>підтверджуємо на самому чейні призначення</strong> (через його Blockscout API): подія <code>UniversalTxExecuted/Finalized</code> з тим самим <code>subTxId</code> = ✓ доставлено, з часом мосту.${
           m.deliveryActive ? ' <span class="muted">Перевіряю доставку на чейнах призначення…</span>' : ''
         }</p>
         <div class="tx-list">
@@ -1322,8 +1338,14 @@ function renderCall(
     // the outbound payload (empty payload = a plain transfer, so no method).
     const dc = x.destCall;
     const methodName = dc ? dc.method || dc.selector : '';
+    // For a batch (router multicall / UEA multicall), spell out the inner calls so
+    // the action reads as what it actually does, not a bare `multicall()`.
+    const innerTxt =
+      dc && dc.inner && dc.inner.length
+        ? ` · ${dc.inner.map((n) => escapeHtml(n)).join(' → ')}`
+        : '';
     const kind = x.hasPayload
-      ? `крос-чейн виклик${methodName ? ` · ${escapeHtml(methodName)}()` : ''}`
+      ? `крос-чейн виклик${methodName ? ` · ${escapeHtml(methodName)}()${innerTxt}` : ''}`
       : 'крос-чейн переказ';
     const chainTitle = exact
       ? `точний чейн призначення з події шлюзу UniversalTxOutbound`
@@ -1352,6 +1374,12 @@ function renderCall(
       callDetail = `<span class="xc-call" title="Декодовано з payload події шлюзу — аргументи методу на контракті призначення">${escapeHtml(
         dc.method || dc.selector
       )} · ${who} ${escapeHtml(shortAddr(dc.recipient, 8, 6))}${amt}</span>`;
+    } else if (dc && dc.inner && dc.inner.length) {
+      // A batched call we could not decode to a single recipient/amount — show the
+      // inner methods instead, so a swap/multicall still reads as what it does.
+      callDetail = `<span class="xc-call" title="Внутрішні виклики пакета (multicall), декодовані з payload події шлюзу через ABI адресної книги SDK">${escapeHtml(
+        dc.method || 'multicall'
+      )}: ${dc.inner.map((n) => escapeHtml(n)).join(' → ')}</span>`;
     }
 
     // Status, strongest evidence first:
@@ -1361,16 +1389,21 @@ function renderCall(
     //  • the Push gateway rescued the funds back for THIS universal tx (id match);
     //  • otherwise: sent from Push, destination not yet confirmed from its RPC.
     const delivered = x.subTxId ? state?.delivery.get(x.subTxId.toLowerCase()) : undefined;
+    // Bridge time: how long the hop took (Push send → destination settlement).
+    const bridgeTxt =
+      delivered && delivered.ok && delivered.bridgeSeconds != null
+        ? ` · міст ${formatDuration(delivered.bridgeSeconds)}`
+        : '';
     const st =
       delivered && delivered.ok
-        ? { cls: 'st-delivered', text: `✓ доставлено на ${escapeHtml(delivered.chainLabel)}`, title: `Підтверджено з публічного RPC самого ${delivered.chainLabel}: його UniversalGateway/Vault емітив UniversalTxExecuted/Finalized із тим самим subTxId.` }
+        ? { cls: 'st-delivered', text: `✓ доставлено на ${escapeHtml(delivered.chainLabel)}${bridgeTxt}`, title: `Підтверджено з Blockscout самого ${delivered.chainLabel}: його UniversalGateway/Vault емітив UniversalTxExecuted/Finalized із тим самим subTxId.${delivered.bridgeSeconds != null ? ` Час мосту — від виклику на Push до події доставки на призначенні — ${formatDuration(delivered.bridgeSeconds)}.` : ''}` }
         : delivered && !delivered.ok
-        ? { cls: 'st-fail', text: `✗ відхилено на ${escapeHtml(delivered.chainLabel)}`, title: `Підтверджено з RPC ${delivered.chainLabel}: на призначенні емітовано UniversalTxReverted/FundsRescued із тим самим subTxId — доставка не відбулась.` }
+        ? { cls: 'st-fail', text: `✗ відхилено на ${escapeHtml(delivered.chainLabel)}`, title: `Підтверджено з Blockscout ${delivered.chainLabel}: на призначенні емітовано UniversalTxReverted/FundsRescued із тим самим subTxId — доставка не відбулась.` }
         : !a.ok
         ? { cls: 'st-fail', text: '✗ не виконано (Push)', title: 'executeUniversalTx завершився помилкою на Push — крос-чейн дію не відправлено.' }
         : x.rescued
         ? { cls: 'st-rescued', text: '↩ повернуто (rescue)', title: 'Шлюз Push емітив RescueFundsOnSourceChain для цього самого universalTxId (sha256 від tx-хеша цієї дії) і цього токена/чейна: кошти повернулись на Push, доставка не завершилась.' }
-        : { cls: 'st-sent', text: '↗ надіслано (Push)', title: 'Надіслано зі шлюзу Push. Доставку з RPC призначення поки не підтверджено (ще в дорозі, або публічний RPC того чейна недоступний / блокує CORS з браузера). Можна перевірити вручну за посиланням.' };
+        : { cls: 'st-sent', text: '↗ надіслано (Push)', title: 'Надіслано зі шлюзу Push. Доставку з Blockscout призначення поки не підтверджено (ще в дорозі, або в того чейна немає CORS-дружнього Blockscout). Можна перевірити вручну за посиланням.' };
 
     // The link: to the actual settling tx on the destination chain when we have
     // it (the real end of the bridge), else to the recipient address there.

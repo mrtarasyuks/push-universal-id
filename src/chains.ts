@@ -135,47 +135,55 @@ export function destExplorerUrl(caip: string | null | undefined, recipient: stri
   return { url, label: def.label };
 }
 
-/** Everything needed to confirm a cross-chain delivery on the destination chain:
- * its public RPC urls, the UniversalGateway + Vault that emit the settlement
- * events, a destination-tx explorer link builder and a label. All sourced from
- * the SDK's own constants. Returns null for a chain we do not list or a non-EVM
- * one (eth_getLogs does not apply to Solana), so the caller skips confirmation
- * honestly instead of guessing. */
-export interface DestConfig {
+// Destination-chain Blockscout instances verified live (2026-10-07) to answer
+// read-only from a browser (CORS: *) with no API key. We confirm a cross-chain
+// delivery against the destination Blockscout rather than the chain's raw public
+// RPC: Blockscout is CORS-friendly and does not cap the log range the way the raw
+// public RPCs do (which usually blocks CORS or returns an error page), so the
+// "✓ delivered" confirmation actually appears. Only chains verified to work are
+// listed — Arbitrum Sepolia's Blockscout sits behind a Cloudflare bot-challenge
+// (403 from the browser) and BNB testnet has no public Blockscout, so a delivery
+// there stays an honest "sent (Push)" instead of a fabricated confirmation.
+const DEST_BLOCKSCOUT: Record<string, string> = {
+  'eip155:11155111': 'https://eth-sepolia.blockscout.com', // Ethereum Sepolia
+  'eip155:84532': 'https://base-sepolia.blockscout.com', // Base Sepolia
+};
+
+/** A destination chain whose Blockscout we can read to confirm delivery. Returns
+ * null for a chain without a verified CORS-friendly Blockscout (caller then keeps
+ * the Push-side signal) or a non-EVM one. */
+export interface DestBlockscout {
   label: string;
-  vm: VmKind;
-  rpcUrls: string[];
-  /** Gateway + Vault addresses on the destination chain (either may be absent). */
+  base: string;
+  /** The gateway + vault addresses whose settlement events we query; the vault is
+   * first because most deliveries finalize there. Either may be absent. */
   contracts: string[];
-  explorerTxUrl: (hash: string) => string | null;
+  /** Link to the settling tx on the destination chain's own explorer. */
+  txUrl: (hash: string) => string | null;
 }
 
-export function destConfig(caip: string | null | undefined): DestConfig | null {
+export function destBlockscout(caip: string | null | undefined): DestBlockscout | null {
   if (!caip) return null;
   const i = caip.lastIndexOf(':');
   if (i < 0) return null;
   const namespace = caip.slice(0, i);
   const chainId = caip.slice(i + 1);
-  const def = findChainByCaip(namespace, chainId);
-  if (!def || def.vm !== 'evm') return null; // only EVM destinations can be queried via eth_getLogs
-  const info = CHAIN_INFO[def.chain];
-  const rpcUrls = (info?.defaultRPC ?? []).filter(
-    (u, idx, arr) => /^https?:\/\//.test(u) && arr.indexOf(u) === idx
-  );
-  if (!rpcUrls.length) return null;
   const key = `${namespace}:${chainId}`;
+  const base = DEST_BLOCKSCOUT[key];
+  if (!base) return null;
+  const def = findChainByCaip(namespace, chainId);
+  if (!def) return null;
   const contracts = [
-    (UNIVERSAL_GATEWAY_ADDRESSES as Record<string, string>)[key],
     (VAULT_ADDRESSES as Record<string, string>)[key],
+    (UNIVERSAL_GATEWAY_ADDRESSES as Record<string, string>)[key],
   ].filter((a): a is string => !!a && /^0x[0-9a-fA-F]{40}$/.test(a));
   if (!contracts.length) return null;
-  const base = explorerBase(def.chain);
+  const expBase = explorerBase(def.chain);
   return {
     label: def.label,
-    vm: def.vm,
-    rpcUrls,
+    base,
     contracts,
-    explorerTxUrl: (hash: string) => (base ? `${base}/tx/${hash}` : null),
+    txUrl: (hash: string) => (expBase ? `${expBase}/tx/${hash}` : null),
   };
 }
 

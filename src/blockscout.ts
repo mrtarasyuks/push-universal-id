@@ -203,56 +203,64 @@ export async function getLogs(opts: {
   return json.result as RpcLog[];
 }
 
+/** One destination-chain settlement log for a cross-chain sub-tx, read from that
+ * chain's own Blockscout and already decoded by it. */
+export interface DestSettlementLog {
+  /** The settlement event's name (e.g. "UniversalTxFinalized"), taken from
+   * Blockscout's decoded method_call — null when the contract is unverified. */
+  eventName: string | null;
+  /** The settling transaction hash on the destination chain, when the endpoint
+   * provides it (eth-sepolia does; base-sepolia returns null in this list). */
+  txHash: string | null;
+  /** ISO block timestamp of the settling log, for the bridge-time delta. */
+  timestamp: string | null;
+}
+
+interface RawV2Log {
+  decoded?: { method_call?: string } | null;
+  transaction_hash?: string | null;
+  block_timestamp?: string | null;
+}
+
 /**
- * Read-only eth_getLogs against an arbitrary chain's public JSON-RPC (used for
- * the destination chain when confirming cross-chain delivery). Unlike the Donut
- * Blockscout proxy, a normal EVM node honours positional topic filters, so
- * callers can pass `topics: [[sigA, sigB], subTxId]` and the node does the AND
- * filter on the indexed subTxId for us. Returns the logs on success (possibly
- * empty), or `null` on any failure (network / CORS / the node rejecting the
- * query) so the caller can try the next RPC url or fall back to Push-side
- * signals. Never signs or sends anything, no key.
+ * Read a destination chain's Blockscout for the settlement log of one cross-chain
+ * sub-tx, filtered by its `subTxId` (which the settlement event carries as an
+ * indexed topic). Uses the v2 REST endpoint
+ * `/addresses/{contract}/logs?topic=<subTxId>` — verified (2026-10-07) to be
+ * CORS-friendly, keyless, and (unlike the Etherscan-style `/api?module=logs` path)
+ * not harshly rate-limited. Returns the decoded logs (possibly empty) or `null` on
+ * any network/parse error, so a failed confirmation degrades to the honest
+ * Push-side signal instead of a fabricated one. Never signs or sends anything.
  */
-export async function rpcGetLogs(
-  rpcUrl: string,
-  params: {
-    address: string | string[];
-    topics: (string | string[] | null)[];
-    fromBlock?: string;
-    toBlock?: string;
-  }
-): Promise<RpcLog[] | null> {
+export async function getDestSettlementLogs(
+  base: string,
+  contract: string,
+  subTxId: string
+): Promise<DestSettlementLog[] | null> {
   let res: Response;
   try {
-    res = await fetch(rpcUrl, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'eth_getLogs',
-        params: [
-          {
-            address: params.address,
-            topics: params.topics,
-            fromBlock: params.fromBlock ?? 'earliest',
-            toBlock: params.toBlock ?? 'latest',
-          },
-        ],
-      }),
+    res = await fetch(`${base}/api/v2/addresses/${contract}/logs?topic=${subTxId}`, {
+      headers: { accept: 'application/json' },
     });
   } catch {
     return null;
   }
   if (!res.ok) return null;
-  let json: { result?: unknown; error?: unknown };
+  let json: { items?: unknown };
   try {
-    json = (await res.json()) as { result?: unknown; error?: unknown };
+    json = (await res.json()) as { items?: unknown };
   } catch {
     return null;
   }
-  if (json.error || !Array.isArray(json.result)) return null;
-  return json.result as RpcLog[];
+  const items = Array.isArray(json.items) ? (json.items as RawV2Log[]) : [];
+  return items.map((it) => ({
+    eventName:
+      typeof it?.decoded?.method_call === 'string'
+        ? it.decoded.method_call.split('(')[0] || null
+        : null,
+    txHash: typeof it?.transaction_hash === 'string' ? it.transaction_hash : null,
+    timestamp: typeof it?.block_timestamp === 'string' ? it.block_timestamp : null,
+  }));
 }
 
 /**

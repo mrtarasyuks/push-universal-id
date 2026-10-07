@@ -289,6 +289,81 @@ export function selectorLabel(selector: string): string | null {
   return KNOWN_SELECTORS[selector.toLowerCase()] ?? null;
 }
 
+// Canonical selectors for the DEX / router / wrapper methods a cross-chain action
+// commonly invokes on a destination contract, so a swap or a batch reads as a
+// method name instead of a bare 4-byte selector. Every entry is computed from its
+// public function signature with viem's toFunctionSelector (not guessed): e.g.
+// exactInputSingle, multicall(bytes[]), unwrapWETH9. Both the SwapRouter02
+// (no-deadline) and the classic Uniswap V3 SwapRouter variants are included.
+const DEST_METHOD_NAMES: Record<string, string> = {
+  '0xac9650d8': 'multicall', // multicall(bytes[])
+  '0x5ae401dc': 'multicall', // multicall(uint256,bytes[])
+  '0x1f0464d1': 'multicall', // multicall(bytes32,bytes[])
+  '0x04e45aaf': 'exactInputSingle',
+  '0x414bf389': 'exactInputSingle',
+  '0xb858183f': 'exactInput',
+  '0xc04b8d59': 'exactInput',
+  '0x5023b4df': 'exactOutputSingle',
+  '0xdb3e2198': 'exactOutputSingle',
+  '0x09b81346': 'exactOutput',
+  '0xf28c0498': 'exactOutput',
+  '0x38ed1739': 'swapExactTokensForTokens',
+  '0xea598cb0': 'wrap',
+  '0xde0e9a3e': 'unwrap',
+  '0x49404b7c': 'unwrapWETH9',
+  '0xdf2ab5bb': 'sweepToken',
+  '0x12210e8a': 'refundETH',
+  '0xf3995c67': 'selfPermit',
+};
+
+/** Human name for a destination method selector: the standard ERC-20 names first,
+ * then the DEX/router/wrapper names above. null when the selector is unknown (the
+ * UI then shows the raw selector — never a guessed name). */
+function destMethodName(sel: string): string | null {
+  const s = sel.toLowerCase();
+  return KNOWN_SELECTORS[s] ?? DEST_METHOD_NAMES[s] ?? null;
+}
+
+/** Selectors of the multicall wrappers whose first (and only, after the leading
+ * fixed args) dynamic argument is a `bytes[]` of inner calldatas. */
+const BYTES_ARRAY_MULTICALL: Record<string, { type: string }[]> = {
+  '0xac9650d8': [{ type: 'bytes[]' }],
+  '0x5ae401dc': [{ type: 'uint256' }, { type: 'bytes[]' }],
+  '0x1f0464d1': [{ type: 'bytes32' }, { type: 'bytes[]' }],
+};
+
+/** Names (or raw selectors) of the inner calls carried in a batch. */
+function innerNames(datas: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const d of datas) {
+    const s = selOf(d);
+    if (!s) continue;
+    out.push(destMethodName(s) ?? s);
+  }
+  return out;
+}
+
+/** Decode the inner method names of a batched destination call (a router
+ * `multicall(bytes[])` or a UEA multicall), or null when the call is not a batch
+ * / cannot be decoded cleanly. Never guesses. */
+function decodeInnerBatch(selector: string, body: `0x${string}`): string[] | null {
+  try {
+    const abi = BYTES_ARRAY_MULTICALL[selector];
+    if (abi) {
+      const decoded = decodeAbiParameters(abi as never, body) as unknown[];
+      const arr = decoded[decoded.length - 1] as readonly string[];
+      return innerNames(arr);
+    }
+    if (selector === UEA_MULTICALL_SELECTOR) {
+      const [arr] = decodeAbiParameters(MULTICALL_ABI, body);
+      return innerNames((arr as readonly { data: string }[]).map((c) => c.data));
+    }
+  } catch {
+    // keep the selector, drop the (undecodable) inner list
+  }
+  return null;
+}
+
 /** What the cross-chain action calls on the destination contract: the 4-byte
  * selector, a human method name when known, and — for the standard ERC-20
  * methods whose shape is unambiguous — the decoded recipient and amount. */
@@ -300,6 +375,11 @@ export interface DestCall {
   recipient: string | null;
   /** The token amount argument, or null. Raw units of the destination token. */
   amount: bigint | null;
+  /** For a batched call (a UEA multicall or a router `multicall(bytes[])`): the
+   * decoded inner method names, so the UI shows what the batch actually does
+   * (e.g. ["approve", "exactInputSingle"]) instead of a bare multicall selector.
+   * null for a non-batch call. */
+  inner: string[] | null;
 }
 
 /** Decode the method a cross-chain action invokes on the destination contract
@@ -311,7 +391,7 @@ export function decodeDestPayload(payload: string | undefined | null): DestCall 
   if (!payload || payload.length <= 2) return null;
   const selector = selOf(payload);
   if (!selector) return null;
-  const method = KNOWN_SELECTORS[selector] ?? null;
+  const method = destMethodName(selector);
   const body = ('0x' + payload.slice(10)) as `0x${string}`;
   try {
     if (selector === '0xa9059cbb' || selector === '0x095ea7b3') {
@@ -320,7 +400,7 @@ export function decodeDestPayload(payload: string | undefined | null): DestCall 
         [{ type: 'address' }, { type: 'uint256' }],
         body
       );
-      return { selector, method, recipient: safeAddr(addr as string), amount: amt as bigint };
+      return { selector, method, recipient: safeAddr(addr as string), amount: amt as bigint, inner: null };
     }
     if (selector === '0x23b872dd') {
       // transferFrom(address from,address to,uint256)
@@ -328,12 +408,15 @@ export function decodeDestPayload(payload: string | undefined | null): DestCall 
         [{ type: 'address' }, { type: 'address' }, { type: 'uint256' }],
         body
       );
-      return { selector, method, recipient: safeAddr(to as string), amount: amt as bigint };
+      return { selector, method, recipient: safeAddr(to as string), amount: amt as bigint, inner: null };
     }
   } catch {
     // Fall through — keep the selector, drop the (undecodable) arguments.
   }
-  return { selector, method, recipient: null, amount: null };
+  // Not a standard ERC-20 call: if it is a batch (router multicall / UEA
+  // multicall), list its inner methods so the action still reads in plain words.
+  const inner = decodeInnerBatch(selector, body);
+  return { selector, method, recipient: null, amount: null, inner };
 }
 
 // ---- Deterministic Push-Chain universalTxId ----
@@ -475,135 +558,29 @@ export const RESCUE_EVENT_TOPIC0 = encodeEventTopics({
 
 // ---- Delivery confirmation on the destination chain ----
 // The Push side only tells us the outbound was *sent*. The authoritative "it
-// arrived" lives on the destination chain, where the UniversalGateway/Vault emit
-// an event once the TSS executes the inbound leg. Every one of those events
-// carries the SAME `subTxId` (topic1) as the Push-side UniversalTxOutbound, so we
-// can confirm a specific action by querying the destination chain's own public
-// RPC for a log with that subTxId — no indexer, no key. ABIs copied verbatim from
-// @pushchain/core's universal-tx-detector (events.js), sourced there from
-// push-chain-gateway-contracts / push-chain-core-contracts.
-const REVERT_INSTRUCTIONS = {
-  name: 'revertInstruction',
-  type: 'tuple',
-  components: [
-    { name: 'revertRecipient', type: 'address' },
-    { name: 'revertMsg', type: 'bytes' },
-  ],
-} as const;
+// arrived" lives on the destination chain, where the UniversalGateway/Vault emit a
+// settlement event once the TSS executes the inbound leg — UniversalTxExecuted /
+// UniversalTxFinalized (arrived) or UniversalTxReverted / RevertUniversalTx /
+// FundsRescued (bounced). Every one carries the SAME `subTxId` (an indexed topic)
+// as the Push-side UniversalTxOutbound, so a specific action is confirmed by
+// finding a settlement log with that subTxId on the destination chain.
+//
+// We classify by the settlement event's NAME (read from the destination
+// Blockscout's own decoded log) rather than by a hardcoded topic0/ABI: the
+// deployed events differ from the SDK's ABI (the live UniversalTxFinalized carries
+// an extra indexed `wrapperAddress`, verified on eth-sepolia 2026-10-07), so a
+// hardcoded signature would compute the wrong topic0 and silently never match. The
+// verified contract's own decoding is authoritative and stays correct across
+// gateway versions.
 
-const DEST_EVENT_ABI = [
-  {
-    type: 'event',
-    name: 'UniversalTxExecuted',
-    anonymous: false,
-    inputs: [
-      { indexed: true, name: 'subTxId', type: 'bytes32' },
-      { indexed: true, name: 'universalTxId', type: 'bytes32' },
-      { indexed: true, name: 'pushAccount', type: 'address' },
-      { indexed: false, name: 'target', type: 'address' },
-      { indexed: false, name: 'token', type: 'address' },
-      { indexed: false, name: 'amount', type: 'uint256' },
-      { indexed: false, name: 'data', type: 'bytes' },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'UniversalTxFinalized',
-    anonymous: false,
-    inputs: [
-      { indexed: true, name: 'subTxId', type: 'bytes32' },
-      { indexed: true, name: 'universalTxId', type: 'bytes32' },
-      { indexed: true, name: 'pushAccount', type: 'address' },
-      { indexed: false, name: 'recipient', type: 'address' },
-      { indexed: false, name: 'token', type: 'address' },
-      { indexed: false, name: 'amount', type: 'uint256' },
-      { indexed: false, name: 'data', type: 'bytes' },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'UniversalTxReverted',
-    anonymous: false,
-    inputs: [
-      { indexed: true, name: 'subTxId', type: 'bytes32' },
-      { indexed: true, name: 'universalTxId', type: 'bytes32' },
-      { indexed: true, name: 'token', type: 'address' },
-      { indexed: false, name: 'amount', type: 'uint256' },
-      REVERT_INSTRUCTIONS,
-    ],
-  },
-  {
-    type: 'event',
-    name: 'RevertUniversalTx',
-    anonymous: false,
-    inputs: [
-      { indexed: true, name: 'subTxId', type: 'bytes32' },
-      { indexed: true, name: 'universalTxId', type: 'bytes32' },
-      { indexed: true, name: 'to', type: 'address' },
-      { indexed: false, name: 'token', type: 'address' },
-      { indexed: false, name: 'amount', type: 'uint256' },
-      REVERT_INSTRUCTIONS,
-    ],
-  },
-  {
-    type: 'event',
-    name: 'FundsRescued',
-    anonymous: false,
-    inputs: [
-      { indexed: true, name: 'subTxId', type: 'bytes32' },
-      { indexed: true, name: 'universalTxId', type: 'bytes32' },
-      { indexed: true, name: 'token', type: 'address' },
-      { indexed: false, name: 'amount', type: 'uint256' },
-      REVERT_INSTRUCTIONS,
-    ],
-  },
-] as const;
-
-const DEST_SUCCESS_EVENTS = new Set(['UniversalTxExecuted', 'UniversalTxFinalized']);
-
-function topic0(name: 'UniversalTxExecuted' | 'UniversalTxFinalized' | 'UniversalTxReverted' | 'RevertUniversalTx' | 'FundsRescued'): string {
-  return encodeEventTopics({ abi: DEST_EVENT_ABI, eventName: name })[0] as string;
-}
-
-/** topic0 of every destination-chain event that proves a sub-tx's fate — handed
- * as a topics[0] OR-set to eth_getLogs so one query covers success and failure. */
-export const DEST_EVENT_TOPICS: string[] = [
-  topic0('UniversalTxExecuted'),
-  topic0('UniversalTxFinalized'),
-  topic0('UniversalTxReverted'),
-  topic0('RevertUniversalTx'),
-  topic0('FundsRescued'),
-];
-
-/** The destination-chain fate of one outbound sub-tx. */
-export interface DeliveryLog {
-  subTxId: string;
-  /** true for Executed/Finalized (arrived), false for Reverted/Rescued (bounced). */
-  ok: boolean;
-  eventName: string;
-  /** The transaction hash ON THE DESTINATION CHAIN that settled it. */
-  destTxHash: string;
-}
-
-/** Decode a destination-chain settlement log, or null if it is not one. */
-export function decodeDeliveryLog(log: RpcLog): DeliveryLog | null {
-  try {
-    const d = decodeEventLog({
-      abi: DEST_EVENT_ABI,
-      data: log.data as `0x${string}`,
-      topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
-    });
-    const subTxId = (d.args as { subTxId?: string }).subTxId;
-    if (!subTxId) return null;
-    return {
-      subTxId: subTxId.toLowerCase(),
-      ok: DEST_SUCCESS_EVENTS.has(d.eventName),
-      eventName: d.eventName,
-      destTxHash: log.transactionHash,
-    };
-  } catch {
-    return null;
-  }
+/** Classify a destination settlement event name into a delivery outcome:
+ * 'ok' for Executed/Finalized (arrived), 'fail' for Reverted/Rescued (bounced),
+ * null for anything else. */
+export function classifyDelivery(eventName: string | null | undefined): 'ok' | 'fail' | null {
+  if (!eventName) return null;
+  if (/Executed|Finalized/i.test(eventName)) return 'ok';
+  if (/Revert|Rescued/i.test(eventName)) return 'fail';
+  return null;
 }
 
 /** A decoded RescueFundsOnSourceChain: funds for a failed cross-chain tx that the
