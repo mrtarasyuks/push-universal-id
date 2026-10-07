@@ -367,6 +367,7 @@ const PAGE_CAP = 12; // safety cap for auto / "load all", ~600 items
 const LOADING_STEPS = ['Шукаю акаунт', 'Рахую активність', 'Готую результат'];
 
 function renderLoading(step: number) {
+  delete el.result.dataset.paintedFor; // a new lookup animates its first paint again
   el.result.innerHTML = `
     <div class="card loading-card">
       <ol class="loading-steps">
@@ -1446,6 +1447,11 @@ function render() {
       </section>`
     : '';
 
+  // the result is re-rendered as each piece of data lands (~10 times per lookup): only the FIRST paint for an
+  // account animates; later ones swap the content quietly (no fade-in, no count-up from 0) and keep open <details>
+  const repaint = el.result.dataset.paintedFor === m.uea;
+  const openDetails = repaint ? [...el.result.querySelectorAll<HTMLDetailsElement>('details')].map((d) => d.open) : [];
+  el.result.classList.toggle('quiet', repaint);
   el.result.innerHTML = `
     <div class="card">
       <div class="card-head">
@@ -1477,7 +1483,12 @@ function render() {
       )}) та offchain CREATE2 (@pushchain/core) · активність і декодування з Blockscout · крос-чейн напрямок, метод і статус — події UniversalTxOutbound / RescueFundsOnSourceChain через eth_getLogs · ${nowUtc()}</p>
     </div>`;
 
-  animateCountUps(el.result);
+  if (repaint) {
+    el.result.querySelectorAll<HTMLDetailsElement>('details').forEach((d, i) => { if (openDetails[i]) d.open = true; });
+  } else {
+    animateCountUps(el.result);
+    el.result.dataset.paintedFor = m.uea;
+  }
 
   const more = document.getElementById('load-more');
   if (more) more.addEventListener('click', () => loadMore());

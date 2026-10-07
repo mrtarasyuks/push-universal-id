@@ -533,3 +533,13 @@ details.relayers summary::before { content: "▸ "; color: var(--accent-2); tran
 details.relayers[open] summary::before { transform: rotate(90deg); }
 details.relayers summary:hover { color: var(--accent-2); }
 details.relayers p { margin: 8px 0 0; max-height: 180px; overflow: auto; line-height: 1.7; word-break: break-word; }
+
+/* later re-renders of the same result (more data landed): no appearance animation — that was the «blinking» */
+#result.quiet .card,
+#result.quiet .block,
+#result.quiet .verdict,
+#result.quiet .metric,
+#result.quiet .app,
+#result.quiet .tx {
+  animation: none;
+}
