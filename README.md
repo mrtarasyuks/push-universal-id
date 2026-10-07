@@ -21,7 +21,12 @@ action — not just the relayer and token contracts a plain explorer stops at. F
 actions it reads the gateway's own **`UniversalTxOutbound` event** (via `eth_getLogs`) to show
 the **exact destination chain** the universal call was routed to (and the recipient contract on
 it), rather than inferring the chain from the bridged token. A ✓ next to a destination means it
-was confirmed from that event. Actions are **grouped per app**, so you see at a
+was confirmed from that event. For each cross-chain action it also shows the **method it invokes
+on the destination contract** (decoded from the outbound `payload`), a **status** read from the
+Push side (**sent** / **returned (rescue)** when the gateway sent the funds back after a failed
+delivery / **not executed** when the Push tx itself reverted), and a direct **link to the
+destination chain's own explorer** (Arbiscan / Basescan / Etherscan / BscScan / Solana Explorer)
+so you can see the end of the bridge, not just the Push side. Actions are **grouped per app**, so you see at a
 glance the wallet's main integrations (how many calls and how much PC each), and the full
 history is **auto-loaded in the background** so gas and the top-apps totals cover everything,
 not just the first page.
@@ -108,6 +113,20 @@ tool shows.
   a generic gas token, or the same token bridged to different chains, is resolved correctly. A ✓
   marks a destination confirmed from the event; without a matching event the tool falls back to
   the token-derived chain and says so.
+- **Destination method** — the `UniversalTxOutbound` event's `payload` is the calldata the
+  action runs on the destination contract; its 4-byte selector is decoded (and named for the few
+  standard selectors) to show *what* the cross-chain call does, not just where it lands. An empty
+  payload is a plain transfer (no method).
+- **Cross-chain status (Push-side signals)** — the gateway also emits
+  `RescueFundsOnSourceChain` when a cross-chain delivery fails and the bridged funds are returned
+  to the UEA on Push. The tool reads these via `eth_getLogs` and flags the matching direction as
+  **returned (rescue)**; a universal tx that reverted on Push is **not executed**; otherwise the
+  action is **sent**. These are the signals observable on Push Chain; the final *success* on the
+  destination chain is not asserted from Push — the destination-explorer link is provided so you
+  confirm it on the authoritative chain yourself.
+- **Destination-explorer link** — the recipient's address is linked on the destination chain's
+  own explorer, using that chain's `explorerUrl` from the SDK constants (Solana links include the
+  `cluster=devnet` the Solana Explorer needs).
 
 Every result footer shows the data source and the time it was read. When a source fails,
 the tool says so instead of showing made-up numbers.
@@ -139,11 +158,17 @@ The static site is built into `docs/` so GitHub Pages can serve it as-is.
   `next_page_params` (capped at ~600 items / 12 pages to bound requests); past that cap a manual
   “load more / load all” continues. The headline “transactions / token-transfers total”
   counters are the true lifetime totals from the API regardless of how much is loaded.
-- A cross-chain action's destination **chain** comes from the bridged synthetic PRC-20 token
-  (the SDK maps each one to its origin chain); the exact `chainNamespace` string is not in the
-  calldata, so the label is derived from the token, and the destination **contract** is the raw
-  `recipient` from the gateway call. Bridged amounts use each token's real decimals when the
-  explorer has reported them, else default to 18.
+- A cross-chain action's destination **chain** is taken from the gateway's `UniversalTxOutbound`
+  event (`chainNamespace`, authoritative, marked ✓) when the event is found; otherwise it falls
+  back to the chain the bridged synthetic PRC-20 token maps to (and says so). The destination
+  **contract** is the raw `recipient` from the gateway call. Bridged amounts use each token's real
+  decimals when the explorer has reported them, else default to 18.
+- Cross-chain **status** uses only Push-side signals (sent / rescued-back / reverted-on-Push). A
+  **rescue** is matched to an action by *direction* (same UEA sender + token + destination chain),
+  not by a shared sub-transaction id, so it flags the direction rather than one exact transfer; and
+  final delivery **success on the destination chain is not claimed from Push** — use the
+  destination-explorer link to verify it. This keeps the tool honest about what it can and cannot
+  see from a single chain.
 - "Gas paid by the UEA" counts only the UEA's own outgoing transactions; most UEAs are
   funded by a relayer (shown separately), so this is often 0 — the tool only shows it when
   it is non-zero.

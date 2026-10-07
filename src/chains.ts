@@ -1,4 +1,5 @@
 import { CHAIN, chainMeta } from './uea';
+import { CHAIN_INFO } from '@pushchain/core/src/lib/constants/chain';
 
 export type VmKind = 'evm' | 'svm';
 
@@ -100,6 +101,34 @@ export function chainLabelFromNamespace(ns: string): string {
   const namespace = ns.slice(0, i);
   const chainId = ns.slice(i + 1);
   return findChainByCaip(namespace, chainId)?.label ?? ns;
+}
+
+/** That chain's own block explorer base URL (from the SDK's CHAIN_INFO), or null
+ * when we do not have one. */
+function explorerBase(chain: CHAIN): string | null {
+  const url = CHAIN_INFO[chain]?.explorerUrl;
+  return url && /^https?:\/\//.test(url) ? url.replace(/\/+$/, '') : null;
+}
+
+/**
+ * Build a direct link to a recipient address on the *destination* chain's own
+ * explorer (Arbiscan / Basescan / Etherscan / BscScan / Solana Explorer), so the
+ * user can see the end of the bridge — not just the Push side. `caip` is the
+ * destination CAIP-2 ("eip155:421614" or "solana:…"), `recipient` the checksummed
+ * EVM address or base58 Solana pubkey. Returns null when the chain is unknown to
+ * us, has no explorer, or there is no recipient (never a guessed link).
+ */
+export function destExplorerUrl(caip: string | null | undefined, recipient: string | null): { url: string; label: string } | null {
+  if (!caip || !recipient) return null;
+  const i = caip.lastIndexOf(':');
+  if (i < 0) return null;
+  const def = findChainByCaip(caip.slice(0, i), caip.slice(i + 1));
+  if (!def) return null;
+  const base = explorerBase(def.chain);
+  if (!base) return null;
+  // Solana Explorer needs the cluster for a testnet/devnet pubkey.
+  const url = def.vm === 'svm' ? `${base}/address/${recipient}?cluster=devnet` : `${base}/address/${recipient}`;
+  return { url, label: def.label };
 }
 
 // ---- Donut testnet facts (from the SDK's own constants) ----

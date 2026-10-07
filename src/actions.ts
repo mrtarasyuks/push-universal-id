@@ -104,11 +104,26 @@ export interface CrossChain {
   /** true when `payload` is non-empty — a cross-chain contract call, not a
    * plain funds transfer. */
   hasPayload: boolean;
+  /** CAIP-2 of the destination chain derived from the bridged token (e.g.
+   * "eip155:421614"), used to build a destination-explorer link when the
+   * authoritative event namespace is not available. */
+  caip?: string | null;
+  /** 4-byte selector of the method this action calls on the destination
+   * contract, decoded from the outbound `payload`. '' for a plain transfer. */
+  destSelector?: string;
   /** Exact destination chain label, taken from the gateway's UniversalTxOutbound
    * event (authoritative). Set after the event logs are fetched; null until then
    * or when no matching event exists, in which case the UI falls back to `chain`
    * (derived from the bridged token). */
   exactChain?: string | null;
+  /** CAIP-2 destination namespace from the gateway event (authoritative), set
+   * alongside `exactChain`. Preferred over `caip` for the explorer link. */
+  exactNamespace?: string | null;
+  /** True when the gateway later emitted RescueFundsOnSourceChain for this UEA on
+   * this token+destination — the bridged funds came back to Push, i.e. the
+   * cross-chain delivery did not complete. Matched by direction (sender+token+
+   * chain), not by a shared id, so it flags the direction, not one exact tx. */
+  rescued?: boolean;
 }
 
 export interface InnerCall {
@@ -201,13 +216,16 @@ function decodeOutbound(data: string): CrossChain | null {
       payload: string;
     };
     const meta = tokenMeta(req.token);
+    const hasPayload = !!req.payload && req.payload.length > 2;
     return {
       chain: meta?.chain ?? null,
       tokenSymbol: meta?.symbol ?? null,
       token: safeAddr(req.token),
       amount: req.amount,
       recipient: decodeRecipient(req.recipient),
-      hasPayload: !!req.payload && req.payload.length > 2,
+      hasPayload,
+      caip: meta?.caip ?? null,
+      destSelector: hasPayload ? selOf(req.payload) : '',
     };
   } catch {
     return null;
@@ -309,6 +327,11 @@ export interface OutboundEvent {
   token: string;
   amount: bigint;
   recipient: string | null;
+  /** The gateway's unique id for this outbound (indexed topic). */
+  subTxId: string;
+  /** 4-byte selector of the method invoked on the destination contract, decoded
+   * from the event's `payload`. '' when the payload is empty (a plain transfer). */
+  destSelector: string;
 }
 
 /** Decode a raw UniversalTxOutbound log, or null if it is not one / malformed. */
@@ -320,11 +343,13 @@ export function decodeOutboundEvent(log: RpcLog): OutboundEvent | null {
       topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
     });
     const a = d.args as unknown as {
+      subTxId: string;
       sender: string;
       chainNamespace: string;
       token: string;
       amount: bigint;
       recipient: string;
+      payload: string;
     };
     if (!a.chainNamespace) return null;
     return {
@@ -335,6 +360,74 @@ export function decodeOutboundEvent(log: RpcLog): OutboundEvent | null {
       token: safeAddr(a.token),
       amount: typeof a.amount === 'bigint' ? a.amount : BigInt(a.amount ?? 0),
       recipient: decodeRecipient(a.recipient),
+      subTxId: a.subTxId ?? '',
+      destSelector: a.payload && a.payload.length > 2 ? selOf(a.payload) : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ---- Rescue (revert) signal on Push ----
+// When a cross-chain delivery fails, the gateway returns the bridged funds to the
+// UEA on Push and emits `RescueFundsOnSourceChain`. Detecting it tells us a
+// cross-chain action's funds came back — i.e. it did not complete at the
+// destination. ABI copied verbatim from @pushchain/core (universalGatewayPC.evm).
+
+const RESCUE_EVENT_ABI = [
+  {
+    type: 'event',
+    name: 'RescueFundsOnSourceChain',
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: 'universalTxId', type: 'bytes32' },
+      { indexed: true, name: 'prc20', type: 'address' },
+      { indexed: false, name: 'chainNamespace', type: 'string' },
+      { indexed: true, name: 'sender', type: 'address' },
+      { indexed: false, name: 'txType', type: 'uint8' },
+      { indexed: false, name: 'gasFee', type: 'uint256' },
+      { indexed: false, name: 'gasPrice', type: 'uint256' },
+      { indexed: false, name: 'gasLimit', type: 'uint256' },
+    ],
+  },
+] as const;
+
+export const RESCUE_EVENT_TOPIC0 = encodeEventTopics({
+  abi: RESCUE_EVENT_ABI,
+  eventName: 'RescueFundsOnSourceChain',
+})[0] as string;
+
+/** A decoded RescueFundsOnSourceChain: funds for a failed cross-chain tx that the
+ * gateway returned to `sender` (the UEA) on Push. */
+export interface RescueEvent {
+  txHash: string;
+  logIndex: number;
+  block: number;
+  sender: string;
+  token: string;
+  chainNamespace: string;
+}
+
+/** Decode a raw RescueFundsOnSourceChain log, or null if not one / malformed. */
+export function decodeRescueEvent(log: RpcLog): RescueEvent | null {
+  try {
+    const d = decodeEventLog({
+      abi: RESCUE_EVENT_ABI,
+      data: log.data as `0x${string}`,
+      topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
+    });
+    const a = d.args as unknown as {
+      sender: string;
+      prc20: string;
+      chainNamespace: string;
+    };
+    return {
+      txHash: log.transactionHash,
+      logIndex: Number.parseInt(log.logIndex, 16),
+      block: Number.parseInt(log.blockNumber, 16),
+      sender: safeAddr(a.sender),
+      token: safeAddr(a.prc20),
+      chainNamespace: a.chainNamespace ?? '',
     };
   } catch {
     return null;

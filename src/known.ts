@@ -2,6 +2,7 @@ import { getAddress } from 'viem';
 import {
   SYNTHETIC_PUSH_ERC20,
   CHAIN_INFO,
+  VM_NAMESPACE,
   UEA_PROXY,
   PUSH_BATCH_EXECUTOR_ADDRESS,
 } from '@pushchain/core/src/lib/constants/chain';
@@ -27,6 +28,8 @@ export interface KnownAddr {
 export interface TokenMeta {
   symbol: string;
   chain: string;
+  /** CAIP-2 of that chain (e.g. "eip155:421614"), for destination links. */
+  caip?: string | null;
 }
 
 const NET = PUSH_NETWORK.TESTNET_DONUT;
@@ -54,6 +57,26 @@ const CHAIN_BY_CODE: Record<string, string> = {
   SOL: 'Solana Devnet',
 };
 
+// Each token-suffix code → the SDK CHAIN it represents, so we can read that
+// chain's CAIP-2 (namespace:chainId) straight from the SDK's own constants and
+// build a destination-explorer link without guessing.
+const CHAIN_ENUM_BY_CODE: Record<string, CHAIN> = {
+  ETH: CHAIN.ETHEREUM_SEPOLIA,
+  ARB: CHAIN.ARBITRUM_SEPOLIA,
+  BASE: CHAIN.BASE_SEPOLIA,
+  BNB: CHAIN.BNB_TESTNET,
+  BSC: CHAIN.BNB_TESTNET,
+  SOL: CHAIN.SOLANA_DEVNET,
+};
+
+function caipOfCode(code: string): string | null {
+  const chain = CHAIN_ENUM_BY_CODE[code];
+  if (chain == null) return null;
+  const info = CHAIN_INFO[chain];
+  if (!info) return null;
+  return `${VM_NAMESPACE[info.vm]}:${info.chainId}`;
+}
+
 // A synthetic key like `USDT_ARB` → symbol `USDT`, chain code `ARB`. Keys with
 // no suffix are the chain's native asset: pETH→ETH, pBNB→BNB, pSOL→SOL.
 function tokenMetaFromKey(key: string): TokenMeta {
@@ -61,10 +84,11 @@ function tokenMetaFromKey(key: string): TokenMeta {
     const i = key.indexOf('_');
     const symbol = key.slice(0, i);
     const code = key.slice(i + 1);
-    return { symbol, chain: CHAIN_BY_CODE[code] ?? code };
+    return { symbol, chain: CHAIN_BY_CODE[code] ?? code, caip: caipOfCode(code) };
   }
   const base: Record<string, string> = { pETH: 'ETH', pBNB: 'BNB', pSOL: 'SOL' };
-  return { symbol: key, chain: CHAIN_BY_CODE[base[key] ?? ''] ?? 'Push Chain' };
+  const code = base[key] ?? '';
+  return { symbol: key, chain: CHAIN_BY_CODE[code] ?? 'Push Chain', caip: caipOfCode(code) };
 }
 
 const known = new Map<string, KnownAddr>();

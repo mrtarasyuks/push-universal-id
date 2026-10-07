@@ -3,6 +3,7 @@ import {
   findChain,
   findChainByCaip,
   chainLabelFromNamespace,
+  destExplorerUrl,
   REVERSE_ID,
   DONUT,
   donutAddressUrl,
@@ -25,11 +26,14 @@ import {
 import {
   decodeUniversalAction,
   decodeOutboundEvent,
+  decodeRescueEvent,
   selectorLabel,
   OUTBOUND_EVENT_TOPIC0,
+  RESCUE_EVENT_TOPIC0,
   type UniversalAction,
   type InnerCall,
   type OutboundEvent,
+  type RescueEvent,
 } from './actions';
 import { knownAddr, isInfra, tokenMeta, GATEWAY_PC_ADDRESS } from './known';
 import { shortAddr, formatUnits, formatInt, sumGasWei, timeAgo, nowUtc } from './format';
@@ -188,6 +192,11 @@ interface LookupState {
   // already looked up so pagination does not re-query them.
   outbound: Map<string, OutboundEvent[]>;
   outboundFetched: Set<string>;
+  // RescueFundsOnSourceChain events for this UEA (funds returned to Push after a
+  // failed cross-chain delivery), collected alongside the outbound events; used
+  // to flag a cross-chain direction as "reverted / funds rescued".
+  rescues: RescueEvent[];
+  rescueKeys: Set<string>;
   warnings: string[];
   loadingMore: boolean;
   // Background auto-pagination (so gas / top apps cover the whole history).
@@ -350,6 +359,8 @@ async function run() {
     relayers: new Set(),
     outbound: new Map(),
     outboundFetched: new Set(),
+    rescues: [],
+    rescueKeys: new Set(),
     warnings,
     loadingMore: false,
     autoLoading: false,
@@ -500,12 +511,22 @@ async function doResolveOutbound(): Promise<void> {
   let windows = 0;
   while (from <= maxB && windows < OUTBOUND_WINDOW_CAP) {
     const to = Math.min(from + OUTBOUND_WINDOW, maxB);
-    const logs = await getLogs({
-      address: GATEWAY_PC_ADDRESS,
-      topic0: OUTBOUND_EVENT_TOPIC0,
-      fromBlock: toHexBlock(from),
-      toBlock: toHexBlock(to),
-    });
+    // Outbound (destination chain / method) and rescue (revert) events share the
+    // gateway and block range, so fetch both over the same window.
+    const [logs, rescueLogs] = await Promise.all([
+      getLogs({
+        address: GATEWAY_PC_ADDRESS,
+        topic0: OUTBOUND_EVENT_TOPIC0,
+        fromBlock: toHexBlock(from),
+        toBlock: toHexBlock(to),
+      }),
+      getLogs({
+        address: GATEWAY_PC_ADDRESS,
+        topic0: RESCUE_EVENT_TOPIC0,
+        fromBlock: toHexBlock(from),
+        toBlock: toHexBlock(to),
+      }),
+    ]);
     if (state !== m) return; // a newer lookup replaced us — drop stale work
     for (const lg of logs) {
       const ev = decodeOutboundEvent(lg);
@@ -519,6 +540,14 @@ async function doResolveOutbound(): Promise<void> {
         m.outbound.set(hl, arr);
       }
     }
+    for (const lg of rescueLogs) {
+      const rv = decodeRescueEvent(lg);
+      if (!rv || rv.sender.toLowerCase() !== ueaLc) continue;
+      const key = `${rv.txHash.toLowerCase()}:${rv.logIndex}`;
+      if (m.rescueKeys.has(key)) continue;
+      m.rescueKeys.add(key);
+      m.rescues.push(rv);
+    }
     from = to + 1;
     windows += 1;
   }
@@ -528,23 +557,45 @@ async function doResolveOutbound(): Promise<void> {
   for (const p of pending) m.outboundFetched.add(p.hash);
 }
 
-/** Stamp each cross-chain inner call with its exact destination chain from the
- * fetched outbound events. Within a tx, events are matched to calls by token
+/** Stamp each cross-chain inner call with its exact destination chain, the exact
+ * CAIP namespace and the destination method — all from the gateway's own
+ * UniversalTxOutbound event — plus a "rescued" flag when a RescueFundsOnSourceChain
+ * event matches its direction. Within a tx, events are matched to calls by token
  * first, then in log order — so several bridges in one tx map correctly. */
 function attachExactChains(actions: UniversalAction[]): void {
   if (!state) return;
   for (const a of actions) {
     const events = state.outbound.get(a.txHash.toLowerCase());
-    if (!events || !events.length) continue;
-    const used = new Array<boolean>(events.length).fill(false);
-    for (const c of a.calls) {
-      if (!c.crossChain) continue;
-      const tok = c.crossChain.token.toLowerCase();
-      let idx = events.findIndex((e, i) => !used[i] && e.token.toLowerCase() === tok);
-      if (idx < 0) idx = used.findIndex((u) => !u);
-      if (idx < 0) break;
-      used[idx] = true;
-      c.crossChain.exactChain = chainLabelFromNamespace(events[idx].chainNamespace);
+    if (events && events.length) {
+      const used = new Array<boolean>(events.length).fill(false);
+      for (const c of a.calls) {
+        if (!c.crossChain) continue;
+        const tok = c.crossChain.token.toLowerCase();
+        let idx = events.findIndex((e, i) => !used[i] && e.token.toLowerCase() === tok);
+        if (idx < 0) idx = used.findIndex((u) => !u);
+        if (idx < 0) break;
+        used[idx] = true;
+        const ev = events[idx];
+        c.crossChain.exactChain = chainLabelFromNamespace(ev.chainNamespace);
+        c.crossChain.exactNamespace = ev.chainNamespace;
+        // The event's payload selector is authoritative; prefer it over the one
+        // decoded from calldata (identical bytes, but this ties to the ✓ chain).
+        if (ev.destSelector) c.crossChain.destSelector = ev.destSelector;
+      }
+    }
+    // Flag the direction as rescued when a rescue event matches this UEA's token
+    // and destination chain. Matched by direction, not by a shared id.
+    if (state.rescues.length) {
+      for (const c of a.calls) {
+        if (!c.crossChain) continue;
+        const tok = c.crossChain.token.toLowerCase();
+        const label = c.crossChain.exactChain ?? c.crossChain.chain ?? null;
+        c.crossChain.rescued = state.rescues.some(
+          (r) =>
+            r.token.toLowerCase() === tok &&
+            (!label || chainLabelFromNamespace(r.chainNamespace) === label)
+        );
+      }
     }
   }
 }
@@ -656,6 +707,7 @@ function render() {
     tokens: number;
     pcWei: bigint;
     bridged: Map<string, { symbol: string; amount: bigint }>; // token addr → bridged
+    rescued: number; // cross-chain actions in this direction that were rescued back
   }
   const apps = new Map<string, App>();
   const ensure = (key: string, seed: Partial<App>): App => {
@@ -671,6 +723,7 @@ function render() {
         tokens: 0,
         pcWei: 0n,
         bridged: new Map(),
+        rescued: 0,
       };
       apps.set(key, a);
     }
@@ -690,6 +743,7 @@ function render() {
         });
         app.actions += 1;
         app.pcWei += c.value;
+        if (c.crossChain.rescued) app.rescued += 1;
         if (c.crossChain.amount > 0n) {
           const key = c.crossChain.token.toLowerCase();
           const sym = c.crossChain.tokenSymbol ?? 'токен';
@@ -808,7 +862,7 @@ function render() {
   const actionsHtml = actions.length
     ? `<section class="block">
         <h3>Універсальні дії <span class="count-badge">${actions.length}</span></h3>
-        <p class="hint">Декодовано з <code>executeUniversalTx</code> — справжній цільовий застосунок кожної дії, а не релеєр. Крос-чейн дії через шлюз показують чейн і контракт призначення (з даних <code>sendUniversalTxOutbound</code>).</p>
+        <p class="hint">Декодовано з <code>executeUniversalTx</code> — справжній цільовий застосунок кожної дії, а не релеєр. Крос-чейн дії через шлюз показують чейн, метод і контракт призначення, статус (надіслано / повернуто / не виконано) та пряме посилання на експлорер чейна-призначення («кінець мосту»).</p>
         <div class="tx-list">
           ${actions
             .slice(0, 50)
@@ -838,8 +892,16 @@ function render() {
                       `${formatUnits(b.amount.toString(), decimalsOf(addr), 4)} ${escapeHtml(b.symbol)}`
                   )
                   .join(', ');
+                const rescuedNote = p.rescued
+                  ? `<span class="st st-rescued" title="Для цього напрямку шлюз повернув кошти на Push (RescueFundsOnSourceChain) — доставка не завершилась. Збіг за напрямком.">↩ ${p.rescued} ${plural(
+                      p.rescued,
+                      'повернення',
+                      'повернення',
+                      'повернень'
+                    )}</span>`
+                  : '';
                 return `<li class="app app-xc">
-                  <span class="app-name"><span class="xc-badge">крос-чейн</span> ${escapeHtml(p.label)}</span>
+                  <span class="app-name"><span class="xc-badge">крос-чейн</span> ${escapeHtml(p.label)} ${rescuedNote}</span>
                   <span class="app-nums">${nums.join(' · ')}${
                   bridged ? ` · міст: ${bridged}` : ''
                 }</span>
@@ -1067,7 +1129,7 @@ function render() {
       ${warningsHtml}
       <p class="source">Origin↔UEA — фабрика Push (${escapeHtml(
         DONUT.explorer
-      )}) та offchain CREATE2 (@pushchain/core) · активність і декодування з Blockscout · крос-чейн напрямок — події UniversalTxOutbound через eth_getLogs · ${nowUtc()}</p>
+      )}) та offchain CREATE2 (@pushchain/core) · активність і декодування з Blockscout · крос-чейн напрямок, метод і статус — події UniversalTxOutbound / RescueFundsOnSourceChain через eth_getLogs · ${nowUtc()}</p>
     </div>`;
 
   const more = document.getElementById('load-more');
@@ -1116,7 +1178,12 @@ function renderCall(
     const chain = x.exactChain ?? x.chain ?? 'інший чейн';
     const mark = exact ? '<span class="xc-exact" aria-hidden="true">✓</span>' : '';
     const dest = x.recipient ? ` · ${escapeHtml(shortAddr(x.recipient, 8, 6))}` : '';
-    const kind = x.hasPayload ? 'крос-чейн виклик' : 'крос-чейн переказ';
+    // The method this action invokes on the destination contract, decoded from
+    // the outbound payload (empty payload = a plain transfer, so no method).
+    const methodName = x.destSelector ? selectorLabel(x.destSelector) || x.destSelector : '';
+    const kind = x.hasPayload
+      ? `крос-чейн виклик${methodName ? ` · ${escapeHtml(methodName)}()` : ''}`
+      : 'крос-чейн переказ';
     const chainTitle = exact
       ? `точний чейн призначення з події шлюзу UniversalTxOutbound`
       : `чейн виведено з бриджевого токена (подію шлюзу не знайдено)`;
@@ -1128,15 +1195,40 @@ function renderCall(
         : x.tokenSymbol
         ? escapeHtml(x.tokenSymbol)
         : '';
-    return `<a class="tx tx-xc" href="${donutTxUrl(a.txHash)}" target="_blank" rel="noopener" title="Шлюз → ${escapeHtml(
+
+    // Status of the cross-chain action, from signals we can read on Push:
+    //  • the executeUniversalTx itself reverted → nothing was sent;
+    //  • the gateway rescued the funds back → delivery to the destination failed;
+    //  • otherwise it was sent — final delivery is confirmed on the destination
+    //    chain, which the explorer link below lets the user check directly.
+    const st = !a.ok
+      ? { cls: 'st-fail', text: '✗ не виконано (Push)', title: 'executeUniversalTx завершився помилкою на Push — крос-чейн дію не відправлено.' }
+      : x.rescued
+      ? { cls: 'st-rescued', text: '↩ повернуто (rescue)', title: 'Шлюз емітив RescueFundsOnSourceChain для цього напрямку (той самий UEA, токен і чейн): кошти повернулись на Push, тобто доставка на призначення не завершилась. Збіг за напрямком, не за точним subTxId.' }
+      : { cls: 'st-sent', text: '↗ надіслано', title: 'Крос-чейн дію надіслано зі шлюзу Push. Фінальне виконання підтверджується на боці призначення — відкрий отримувача в експлорері призначення.' };
+
+    const link = destExplorerUrl(x.exactNamespace ?? x.caip, x.recipient);
+    const destLink = link
+      ? `<a class="xc-dest" href="${link.url}" target="_blank" rel="noopener" title="Відкрити отримувача на ${escapeHtml(
+          link.label
+        )} — кінець мосту">кінець мосту: ${escapeHtml(link.label)} ↗</a>`
+      : '';
+
+    return `<div class="tx-xc-wrap">
+      <a class="tx tx-xc" href="${donutTxUrl(a.txHash)}" target="_blank" rel="noopener" title="Шлюз → ${escapeHtml(
       chain
     )} — ${chainTitle}${x.recipient ? ` · отримувач ${escapeHtml(x.recipient)}` : ''}">
-      <span class="tx-dir xc">⇄ CC</span>
-      <span class="tx-method">${kind}${tag}</span>
-      <span class="tx-counter">→ ${escapeHtml(chain)}${mark}${dest}</span>
-      <span class="tx-val">${bridged}</span>
-      <span class="tx-time">${status}${time}</span>
-    </a>`;
+        <span class="tx-dir xc">⇄ CC</span>
+        <span class="tx-method">${kind}${tag}</span>
+        <span class="tx-counter">→ ${escapeHtml(chain)}${mark}${dest}</span>
+        <span class="tx-val">${bridged}</span>
+        <span class="tx-time">${time}</span>
+      </a>
+      <div class="xc-sub">
+        <span class="st ${st.cls}" title="${escapeHtml(st.title)}">${st.text}</span>
+        ${destLink}
+      </div>
+    </div>`;
   }
 
   const info = nameOf(c.to);

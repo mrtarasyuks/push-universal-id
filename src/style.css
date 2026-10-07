@@ -313,3 +313,27 @@ button[type="submit"]:hover { filter: brightness(1.08); }
 /* on-chain verification note */
 .verify-ok { color: var(--ok); }
 .verify-ok strong { color: var(--ok); }
+
+/* ---- round: cross-chain destination method, status, end-of-bridge link ---- */
+.tx-xc-wrap {
+  display: flex; flex-direction: column; gap: 0;
+  border: 1px solid rgba(139, 92, 246, 0.4); border-radius: 10px; overflow: hidden;
+}
+.tx-xc-wrap .tx-xc { border: none; border-radius: 0; }
+.xc-sub {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 6px 12px; background: var(--bg-2); border-top: 1px dashed var(--line);
+  font-size: 12px;
+}
+/* status chip for a cross-chain action */
+.st {
+  font-size: 11px; font-weight: 700; border-radius: 6px; padding: 2px 8px;
+  border: 1px solid var(--line); white-space: nowrap;
+}
+.st-sent { color: var(--accent-2); background: rgba(139, 92, 246, 0.16); border-color: rgba(139, 92, 246, 0.4); }
+.st-rescued { color: var(--pending); background: rgba(240, 167, 66, 0.14); border-color: rgba(240, 167, 66, 0.4); }
+.st-fail { color: var(--err); background: rgba(255, 107, 122, 0.12); border-color: rgba(255, 107, 122, 0.4); }
+/* link to the recipient on the destination chain's own explorer */
+.xc-dest { color: var(--accent); text-decoration: none; font-family: ui-monospace, monospace; }
+.xc-dest:hover { text-decoration: underline; }
+.app-xc .app-name .st-rescued { margin-left: 2px; }
